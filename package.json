@@ -1,0 +1,26 @@
+{
+  "name": "smart-lock-fingerprint-system",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Aleyna134/smart-lock-fingerprint-system.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Aleyna134/smart-lock-fingerprint-system/issues"
+  },
+  "homepage": "https://github.com/Aleyna134/smart-lock-fingerprint-system#readme",
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "express": "^5.2.1",
+    "prisma": "^5.22.0"
+  }
+}

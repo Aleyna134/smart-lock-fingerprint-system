@@ -1,0 +1,16 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model Log {
+  id         Int      @id @default(autoincrement())
+  success    Boolean
+  status     String
+  fail_count Int      @default(0)
+  time       DateTime @default(now())
+}
