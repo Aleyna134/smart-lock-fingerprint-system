@@ -51,3 +51,18 @@ void sendLog(AccessLog log) {
     Serial.println("WiFi bağlı değil!");
   }
 }
+
+void testLog() {
+
+  AccessLog log;
+
+  log.user_id = 2;
+  log.success = true;
+  log.status = "unlocked";
+  log.fail_count = 0;
+  log.time = "2026-03-19T15:00:00Z";
+
+  Serial.println("Test log oluşturuldu");
+
+  sendLog(log);
+}
