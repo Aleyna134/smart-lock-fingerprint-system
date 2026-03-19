@@ -1,4 +1,6 @@
 #include <Arduino.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
 
 struct AccessLog {
   int user_id;
@@ -17,4 +19,27 @@ String logToJson(AccessLog log) {
   json += "\"time\":\"" + log.time + "\"";
   json += "}";
   return json;
+}
+
+void sendLog(AccessLog log) {
+
+  if (WiFi.status() == WL_CONNECTED) {
+
+    HTTPClient http;
+
+    http.begin("https://httpbin.org/post"); // test server
+    http.addHeader("Content-Type", "application/json");
+
+    String json = logToJson(log);
+
+    int responseCode = http.POST(json);
+
+    Serial.print("HTTP Response: ");
+    Serial.println(responseCode);
+
+    http.end();
+
+  } else {
+    Serial.println("WiFi bağlı değil!");
+  }
 }
