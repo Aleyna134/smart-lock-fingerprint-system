@@ -1,6 +1,9 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <vector>
+
+std::vector<AccessLog> logQueue;
 
 struct AccessLog {
   int user_id;
@@ -64,5 +67,28 @@ void testLog() {
 
   Serial.println("Test log oluşturuldu");
 
-  sendLog(log);
+  processLog(log);
+}
+
+void processLog(AccessLog log) {
+
+  if (WiFi.status() == WL_CONNECTED) {
+    sendLog(log);
+  } else {
+    Serial.println("WiFi yok → kuyruğa eklendi");
+    logQueue.push_back(log);
+  }
+}
+
+void flushQueue() {
+
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  Serial.println("Kuyruk gönderiliyor...");
+
+  for (int i = 0; i < logQueue.size(); i++) {
+    sendLog(logQueue[i]);
+  }
+
+  logQueue.clear();
 }
