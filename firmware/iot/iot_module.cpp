@@ -27,15 +27,23 @@ void sendLog(AccessLog log) {
 
     HTTPClient http;
 
-    http.begin("https://httpbin.org/post"); // test server
+    http.begin("https://httpbin.org/post");
     http.addHeader("Content-Type", "application/json");
 
     String json = logToJson(log);
 
+    Serial.println("Gönderilen JSON:");
+    Serial.println(json);
+
     int responseCode = http.POST(json);
 
-    Serial.print("HTTP Response: ");
-    Serial.println(responseCode);
+    if (responseCode > 0) {
+      Serial.print("HTTP Response: ");
+      Serial.println(responseCode);
+    } else {
+      Serial.print("Hata: ");
+      Serial.println(responseCode);
+    }
 
     http.end();
 
