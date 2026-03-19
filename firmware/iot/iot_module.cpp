@@ -72,6 +72,10 @@ void testLog() {
 
 void processLog(AccessLog log) {
 
+ if (log.status == "lockout") {
+    sendAlert();
+  }
+
   if (WiFi.status() == WL_CONNECTED) {
     sendLog(log);
   } else {
@@ -101,4 +105,23 @@ void checkConnection() {
   } else {
     Serial.println("WiFi hala yok...");
   }
+}
+
+void sendAlert() {
+
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  HTTPClient http;
+
+  http.begin("https://your-api.com/api/alert");
+  http.addHeader("Content-Type", "application/json");
+
+  String json = "{\"message\":\"LOCKOUT DETECTED\"}";
+
+  int code = http.POST(json);
+
+  Serial.print("Alert gönderildi: ");
+  Serial.println(code);
+
+  http.end();
 }
