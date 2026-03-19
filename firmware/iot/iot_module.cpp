@@ -86,9 +86,19 @@ void flushQueue() {
 
   Serial.println("Kuyruk gönderiliyor...");
 
-  for (int i = 0; i < logQueue.size(); i++) {
-    sendLog(logQueue[i]);
-  }
+  while (!logQueue.empty()) {
+    sendLog(logQueue.front());
+    logQueue.erase(logQueue.begin());
+}
 
   logQueue.clear();
+}
+
+void checkConnection() {
+
+  if (WiFi.status() == WL_CONNECTED) {
+    flushQueue();
+  } else {
+    Serial.println("WiFi hala yok...");
+  }
 }
