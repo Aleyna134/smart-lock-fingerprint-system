@@ -7,10 +7,23 @@ datasource db {
   url      = "file:./dev.db"
 }
 
+// YENİ TABLOMUZ: Kayıtlı Kullanıcılar
+model User {
+  id          Int      @id @default(autoincrement())
+  name        String
+  enrolled_at DateTime @default(now())
+  logs        Log[]    // Bir kullanıcının birden fazla kilit açma logu olabilir
+}
+
+// GÜNCELLENEN TABLOMUZ: Loglar
 model Log {
   id         Int      @id @default(autoincrement())
+  user_id    Int?     // Soru işareti (?) koyduk çünkü hatalı parmak izinde kullanıcı belli olmaz!
   success    Boolean
   status     String
   fail_count Int      @default(0)
   time       DateTime @default(now())
+
+  // Tabloları birbirine bağlıyoruz (İlişki / Relation)
+  user       User?    @relation(fields: [user_id], references: [id])
 }
