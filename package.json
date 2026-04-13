@@ -20,6 +20,7 @@
   "homepage": "https://github.com/Aleyna134/smart-lock-fingerprint-system#readme",
   "dependencies": {
     "@prisma/client": "^5.22.0",
+    "bcryptjs": "^3.0.3",
     "express": "^5.2.1",
     "prisma": "^5.22.0"
   }

@@ -11,19 +11,20 @@ datasource db {
 model User {
   id          Int      @id @default(autoincrement())
   name        String
+  email       String   @unique  // Mail adresi benzersiz olmalı
+  password    String            // Şifre alanı
+  role        String   @default("USER") // "ADMIN" veya "USER"
   enrolled_at DateTime @default(now())
-  logs        Log[]    // Bir kullanıcının birden fazla kilit açma logu olabilir
+  logs        Log[]
 }
 
 // GÜNCELLENEN TABLOMUZ: Loglar
 model Log {
   id         Int      @id @default(autoincrement())
-  user_id    Int?     // Soru işareti (?) koyduk çünkü hatalı parmak izinde kullanıcı belli olmaz!
   success    Boolean
   status     String
-  fail_count Int      @default(0)
   time       DateTime @default(now())
-
-  // Tabloları birbirine bağlıyoruz (İlişki / Relation)
+  fail_count Int      @default(0)
+  user_id    Int?
   user       User?    @relation(fields: [user_id], references: [id])
 }
