@@ -24,10 +24,10 @@ LedManager leds;
 //   RX (Beyaz)    -> GPIO 5 (TX1)
 //
 //   Röle (Kilit):
-//   Sinyal        -> GPIO 7
+//   Sinyal        -> GPIO 1
 //
 //   Buzzer:
-//   Sinyal        -> GPIO 6
+//   Sinyal        -> GPIO 0
 //
 //   Ekran (OLED I2C):
 //   SDA           -> GPIO 8 (C3 Default)

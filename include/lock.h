@@ -4,7 +4,7 @@
 #include <Arduino.h>
 
 /** Röle (Kilit) için varsayılan pin */
-#define LOCK_RELAY_PIN 7
+#define LOCK_RELAY_PIN 1
 
 class LockManager {
 public:

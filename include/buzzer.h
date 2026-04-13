@@ -4,7 +4,7 @@
 #include <Arduino.h>
 
 /** Buzzer için varsayılan pin */
-#define BUZZER_PIN 6
+#define BUZZER_PIN 0
 
 class BuzzerManager {
 public:
