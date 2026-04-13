@@ -1,133 +1,153 @@
 #include <Adafruit_Fingerprint.h>
 #include <HardwareSerial.h>
-#include "lock_logic.h"
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 
-// =====================================================
-// PINLER
-// Belgedeki tabloya göre:
-// R307 TX -> GPIO16 (ESP RX)
-// R307 RX -> GPIO17 (ESP TX)
-// Solenoid/Relay -> GPIO26
-// Red LED -> GPIO25
-// Green LED -> GPIO27
-// Buzzer -> GPIO14
-// =====================================================
-#define FP_RX_PIN      16
-#define FP_TX_PIN      17
-#define LOCK_PIN       26
-#define RED_LED_PIN    25
-#define GREEN_LED_PIN  27
-#define BUZZER_PIN     14
+// ======================= PIN TANIMLARI =======================
+#define FP_RX_PIN       4
+#define FP_TX_PIN       5
 
-// Test için 1 yapabilirsin
-#define MOCK_SENSOR 0
+#define RELAY_PIN       1
+#define BUZZER_PIN      0
+#define GREEN_LED_PIN   10
+#define RED_LED_PIN     3
 
+#define SDA_PIN         8
+#define SCL_PIN         9
+
+// ======================= OLED =======================
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_ADDR 0x3C
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// ======================= FINGERPRINT =======================
 HardwareSerial fingerSerial(1);
 Adafruit_Fingerprint finger = Adafruit_Fingerprint(&fingerSerial);
 
-LockLogic lockLogic(LOCK_PIN, RED_LED_PIN, GREEN_LED_PIN, BUZZER_PIN);
+// ======================= AYARLAR =======================
+#define RELAY_ACTIVE_LEVEL HIGH   // Çalışmazsa LOW yap
+#define RELAY_INACTIVE_LEVEL LOW
 
-uint32_t getCurrentTimestamp() {
-    // Şimdilik basit yaklaşım.
-    // Sonradan NTP ile gerçek Unix time bağlanabilir.
-    return millis() / 1000;
+#define UNLOCK_TIME 5000
+
+// ======================= YARDIMCI =======================
+void showMessage(String l1, String l2 = "") {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setCursor(0, 0);
+  display.println(l1);
+
+  display.setCursor(0, 20);
+  display.println(l2);
+
+  display.display();
 }
 
-#if MOCK_SENSOR
-FingerprintResult getMockFingerprintResult() {
-    static int counter = 0;
-    counter++;
-
-    FingerprintResult result;
-    result.timestamp = getCurrentTimestamp();
-    result.confidence = 0;
-    result.user_id = 0;
-    result.matched = false;
-
-    // örnek test akışı:
-    // 1-2-3 başarısız, 4 başarılı
-    if (counter % 4 == 0) {
-        result.matched = true;
-        result.user_id = 1;
-        result.confidence = 87;
-    }
-
-    return result;
+void beep(int t) {
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(t);
+  digitalWrite(BUZZER_PIN, LOW);
 }
-#endif
 
+void success() {
+  digitalWrite(GREEN_LED_PIN, HIGH);
+  digitalWrite(RED_LED_PIN, LOW);
+  beep(100);
+}
+
+void fail() {
+  digitalWrite(GREEN_LED_PIN, LOW);
+  digitalWrite(RED_LED_PIN, HIGH);
+  beep(100);
+  delay(100);
+  beep(100);
+}
+
+void idle() {
+  digitalWrite(GREEN_LED_PIN, LOW);
+  digitalWrite(RED_LED_PIN, LOW);
+}
+
+void unlockDoor() {
+  digitalWrite(RELAY_PIN, RELAY_ACTIVE_LEVEL);
+  showMessage("ACCESS GRANTED", "Door Open");
+  success();
+
+  delay(UNLOCK_TIME);
+
+  digitalWrite(RELAY_PIN, RELAY_INACTIVE_LEVEL);
+  idle();
+  showMessage("Place Finger");
+}
+
+// ======================= FINGERPRINT =======================
+int checkFingerprint() {
+  uint8_t p = finger.getImage();
+  if (p != FINGERPRINT_OK) return -1;
+
+  p = finger.image2Tz();
+  if (p != FINGERPRINT_OK) return -1;
+
+  p = finger.fingerSearch();
+
+  if (p == FINGERPRINT_OK) {
+    return finger.fingerID;
+  } else if (p == FINGERPRINT_NOTFOUND) {
+    return 0;
+  } else {
+    return -1;
+  }
+}
+
+// ======================= SETUP =======================
 void setup() {
-    Serial.begin(115200);
-    delay(500);
+  Serial.begin(115200);
 
-    fingerSerial.begin(57600, SERIAL_8N1, FP_RX_PIN, FP_TX_PIN);
+  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(GREEN_LED_PIN, OUTPUT);
+  pinMode(RED_LED_PIN, OUTPUT);
 
-    lockLogic.begin();
+  digitalWrite(RELAY_PIN, RELAY_INACTIVE_LEVEL);
 
-#if MOCK_SENSOR
-    Serial.println("MOCK_SENSOR mode active");
-#else
-    if (finger.verifyPassword()) {
-        Serial.println("Fingerprint sensor found");
-    } else {
-        Serial.println("Fingerprint sensor not found");
-        while (1) {
-            delay(10);
-        }
-    }
-#endif
+  // OLED
+  Wire.begin(SDA_PIN, SCL_PIN);
+  display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
+  display.clearDisplay();
 
-    Serial.println("System ready");
+  showMessage("Smart Lock", "Starting...");
+
+  // Fingerprint
+  fingerSerial.begin(57600, SERIAL_8N1, FP_RX_PIN, FP_TX_PIN);
+  finger.begin(57600);
+
+  if (!finger.verifyPassword()) {
+    showMessage("Sensor ERROR");
+    while (1);
+  }
+
+  showMessage("Ready", "Place Finger");
 }
 
+// ======================= LOOP =======================
 void loop() {
-    lockLogic.update();
+  int id = checkFingerprint();
 
-    if (lockLogic.isLockoutActive()) {
-        delay(20);
-        return;
-    }
-
-#if MOCK_SENSOR
-    FingerprintResult result = getMockFingerprintResult();
-    lockLogic.processFingerprintResult(result);
+  if (id > 0) {
+    unlockDoor();
+  }
+  else if (id == 0) {
+    showMessage("ACCESS DENIED");
+    fail();
     delay(1500);
-#else
-    uint8_t p = finger.getImage();
+    idle();
+    showMessage("Place Finger");
+  }
 
-    if (p == FINGERPRINT_NOFINGER) {
-        delay(50);
-        return;
-    }
-
-    FingerprintResult result;
-    result.timestamp = getCurrentTimestamp();
-    result.user_id = 0;
-    result.confidence = 0;
-    result.matched = false;
-
-    if (p != FINGERPRINT_OK) {
-        delay(100);
-        return;
-    }
-
-    p = finger.image2Tz();
-    if (p != FINGERPRINT_OK) {
-        lockLogic.processFingerprintResult(result);
-        delay(500);
-        return;
-    }
-
-    p = finger.fingerFastSearch();
-    if (p == FINGERPRINT_OK) {
-        result.matched = true;
-        result.user_id = finger.fingerID;
-        result.confidence = (finger.confidence > 100) ? 100 : finger.confidence;
-    } else {
-        result.matched = false;
-    }
-
-    lockLogic.processFingerprintResult(result);
-    delay(500);
-#endif
+  delay(100);
 }
