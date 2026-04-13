@@ -5,154 +5,156 @@
 #include "display_manager.h"
 #include "led_manager.h"
 
-// ============================================================================
-// Global Nesneler
-// ============================================================================
-
+// Nesneler
 FingerprintManager fpManager;
 LockManager lockController;
 BuzzerManager buzzer;
 DisplayManager display;
 LedManager leds;
 
-// ============================================================================
-// ESP32-C3 Pin Yapılandırması (GÜNCELLENDİ)
-// ============================================================================
-//
-//   R307 Sensör Bağlantısı:
-//   TX (Sarı)     -> GPIO 4 (RX1)
-//   RX (Beyaz)    -> GPIO 5 (TX1)
-//
-//   Röle (Kilit):
-//   Sinyal        -> GPIO 1
-//
-//   Buzzer:
-//   Sinyal        -> GPIO 0
-//
-//   Ekran (OLED I2C):
-//   SDA           -> GPIO 8 (C3 Default)
-//   SCL           -> GPIO 9 (C3 Default)
-//
-//   LED'ler:
-//   Yeşil         -> GPIO 10
-//   Kırmızı       -> GPIO 3
-//
-// ----------------------------------------------------------------------------
-
 void setup() {
     Serial.begin(115200);
-    delay(2000); // C3 USB-CDC'nin oturması için biraz daha uzun bekleme
+    Serial.setTxTimeoutMs(0);
+    while (!Serial && millis() < 5000) delay(10);
+    
+    Serial.println("\n[SISTEM] LCD Modu Baslatiliyor...");
+    Serial.flush();
 
-    Serial.println("=================================");
-    Serial.println("  Akilli Kilit - Prototip V1.1");
-    Serial.println("=================================");
-
-#ifdef MOCK_MODE
-    Serial.println("[!] MOCK MOD AKTIF - Sanal sensor kullaniliyor");
-#endif
-
-    // Modülleri Başlat
+    // 1. Modülleri Başlat
+    leds.init();
     lockController.init();
     buzzer.init();
-    display.init();
-    leds.init();
-    
-    display.showMessage("Sistem Basliyor...", "Lutfen Bekleyin");
-    buzzer.beepWelcome();
 
-    // Parmak izi sensörünü başlat (C3'te Serial1 kullanılır)
-    bool ok = fpManager.init(&Serial1, 4, 5); 
-
-    if (ok) {
-        Serial.println("[OK] Sensor hazir!");
-        SensorInfo info = fpManager.getSensorData();
-        display.showMessage("Sensor Hazir", "Parmak Okutun");
-        leds.greenOn(); delay(200); leds.allOff(); // Başlangıç testi
-    } else {
-        Serial.println("[HATA] Sensor baslatilamadi!");
-        display.showMessage("HATA!", "Sensor Yok");
-        leds.error();
-        buzzer.beepError();
-        while (true) { delay(1000); }
+    // 2. I2C Tarayıcı (LCD ve Sensör bulmak için)
+    Serial.println("[...] I2C cihazlari taraniyor...");
+    Wire.begin(I2C_SDA, I2C_SCL);
+    for(byte address = 1; address < 127; address++) {
+        Wire.beginTransmission(address);
+        if (Wire.endTransmission() == 0) {
+            Serial.printf("[I2C] Cihaz bulundu: 0x%02X\n", address);
+        }
     }
 
-    Serial.println("\nKomutlar: 'v' (Dogrula), 'e' (Kayit), 'd' (Sil), 's' (Durum)");
-    Serial.println("=================================\n");
+    // 3. LCD Başlat
+    if(display.init()) {
+        display.showMessage("Sistem Hazir", "Parmak Okutun");
+    } else {
+        Serial.println("[HATA] LCD baslatilamadi!");
+    }
+
+    // 4. Parmak İzi Sensörü (Yeni pinler: RX=4, TX=7)
+    if(fpManager.init(&Serial1, 4, 7)) {
+        Serial.println("[OK] Parmak izi sensoru hazir.");
+    } else {
+        Serial.println("[YOK] Sensor bulunamadi.");
+    }
+
+    Serial.println("\n[HAZIR] Komut bekliyorum (v/e/s)...");
 }
 
 void loop() {
     if (Serial.available()) {
         char cmd = Serial.read();
-
         switch (cmd) {
-            case 'v':
-            case 'V': {
-                Serial.println("\n[>] Parmak izinizi okutun...");
+            case 'v': case 'V': {
+                Serial.println("\n[>] Parmak okuma modu aktif.");
+                if (!fpManager.isReady()) {
+                    Serial.println("[HATA] Sensor hazir degil!");
+                    display.showMessage("SENSOR HATASI", "BAGLANTI YOK");
+                    break;
+                }
                 display.showMessage("Parmak Bekleniyor", "Lutfen Okutun");
                 FingerprintResult result = fpManager.verifyFingerprint();
-
+                
                 if (result.matched) {
-                    Serial.printf("[OK] Kullanici %d tanindi.\n", result.user_id);
-                    display.showMessage("ERISIM ONAYLANDI", "Hosgeldiniz ID:" + String(result.user_id));
-                    leds.success();
-                    buzzer.beepSuccess();
+                    display.showMessage("ERISIM ONAYLANDI", "Hosgeldiniz");
+                    leds.success(); buzzer.beepSuccess();
                     lockController.unlock();
-                    delay(3500); // 3.5 saniye açık tut
-                    lockController.lock();
-                    leds.allOff();
-                    display.showMessage("Kilitlendi", "Parmak Okutun");
+                    delay(3000);
+                    lockController.lock(); leds.allOff();
                 } else {
-                    Serial.println("[HATA] Parmak izi gecersiz!");
                     display.showMessage("ERISIM REDDEDILDI", "Gecersiz Parmak");
-                    leds.error();
-                    buzzer.beepError();
-                    delay(2000);
-                    leds.allOff();
-                    display.showMessage("Parmak Okutun");
+                    leds.error(); buzzer.beepError();
+                    delay(2000); leds.allOff();
                 }
+                display.showMessage("Sistem Hazir", "Parmak Okutun");
                 break;
             }
-
-            case 'e':
-            case 'E': {
-                Serial.println("\n[>] Yeni Kayit - Lutfen parmak izinizi 2 kez okutun.");
-                display.showMessage("YENI KAYIT", "Parmak Bekleniyor");
-                bool ok = fpManager.enrollFingerprint(1); 
-                if (ok) {
+            case 'e': case 'E': {
+                Serial.println("\n[>] Kayit modu aktif.");
+                if (!fpManager.isReady()) {
+                    Serial.println("[HATA] Sensor hazir degil!");
+                    display.showMessage("SENSOR HATASI", "BAGLANTI YOK");
+                    break;
+                }
+                display.showMessage("YENI KAYIT", "Parmak Koyun");
+                if (fpManager.enrollFingerprint(1)) {
                     display.showMessage("KAYIT BASARILI", "ID: 1");
-                    leds.success();
-                    buzzer.beepSuccess();
+                    leds.success(); buzzer.beepSuccess();
                 } else {
                     display.showMessage("KAYIT HATASI", "Tekrar Deneyin");
-                    leds.error();
-                    buzzer.beepError();
+                    leds.error(); buzzer.beepError();
                 }
-                delay(2000);
-                leds.allOff();
-                display.showMessage("Parmak Okutun");
+                delay(2000); leds.allOff();
+                display.showMessage("Sistem Hazir", "Parmak Okutun");
                 break;
             }
-
-            case 'd':
-            case 'D': {
-                Serial.println("\n[>] ID 1 siliniyor...");
-                bool ok = fpManager.deleteID(1);
-                if (ok) buzzer.beepSuccess(); else buzzer.beepError();
-                break;
-            }
-
-            case 's':
-            case 'S': {
+            case 's': case 'S': {
+                if (!fpManager.isReady()) {
+                    Serial.println("[DURUM] Sensor: YOK");
+                    display.showMessage("SENSOR: YOK", "BAGLAYIN");
+                    break;
+                }
                 SensorInfo info = fpManager.getSensorData();
-                Serial.println("\n--- Sistem Durumu ---");
-                Serial.printf("  Sensor:   %s\n", info.connected ? "BAGLI" : "HATA");
-                Serial.printf("  Kayitli:  %d\n", info.template_count);
-                Serial.printf("  Kilit:    %s\n", lockController.isLocked() ? "KILITLI" : "ACIK");
-                Serial.println("----------------------\n");
+                Serial.printf("\n[DURUM] Sensor: %s | Kayitli: %d\n", 
+                             info.connected ? "BAGLI" : "YOK", info.template_count);
+                display.showMessage("KAYITLI SAYISI:", String(info.template_count));
+                delay(2000);
+                display.showMessage("Sistem Hazir", "Parmak Okutun");
+                break;
+            }
+            case 'l': case 'L': {
+                Serial.println("\n[TEST] Donanim testi...");
+                display.showMessage("TEST BASLADI", "LED & ROLE");
+                
+                // LED'ler
+                leds.greenOn(); delay(500); leds.allOff();
+                leds.error(); delay(500); leds.allOff();
+                
+                // RÖLE TESTİ (1 saniye tetikle)
+                Serial.println("-> ROLE TETIKLENDI (Tık sesi bekleniyor)");
+                lockController.unlock(); // GPIO 1: HIGH
+                delay(1000);
+                lockController.lock();   // GPIO 1: LOW
+                Serial.println("-> ROLE DURDU");
+
+                display.showMessage("TEST TAMAM", "Sistem Hazir");
+                break;
+            }
+            case 'o': case 'O': {
+                Serial.println("\n[MANUEL] Kapi ACILIYOR...");
+                display.showMessage("KAPI DURUMU:", "ACIK (MANUEL)");
+                lockController.unlock();
+                leds.greenOn();
+                break;
+            }
+            case 'k': case 'K': {
+                Serial.println("\n[MANUEL] Kapi KILITLENIYOR...");
+                display.showMessage("KAPI DURUMU:", "KILITLI");
+                lockController.lock();
+                leds.allOff();
+                delay(1500);
+                display.showMessage("Sistem Hazir", "Parmak Okutun");
                 break;
             }
         }
     }
+    
+    // Heartbeat
+    static unsigned long hb = 0;
+    if(millis() - hb > 15000) {
+        Serial.println("[CANLI] Komut bekliyorum...");
+        hb = millis();
+    }
     delay(50);
 }
-

@@ -4,7 +4,7 @@
 #include <Arduino.h>
 
 /** Röle (Kilit) için varsayılan pin */
-#define LOCK_RELAY_PIN 1
+#define LOCK_RELAY_PIN 2
 
 class LockManager {
 public:
@@ -12,17 +12,18 @@ public:
 
     void init() {
         pinMode(_pin, OUTPUT);
-        lock(); // Başlangıçta kilitli tut
+        digitalWrite(_pin, HIGH); // Başlangıçta kilidi kapalı tut (HIGH = Röle Bırakır)
+        _isLocked = true;
     }
 
     void unlock() {
-        digitalWrite(_pin, HIGH); // Röle tipine göre LOW/HIGH değişebilir
+        digitalWrite(_pin, LOW);  // Röleyi tetikle (Aktif Et)
         _isLocked = false;
         Serial.println("[LOCK] Kapı ACILDI");
     }
 
     void lock() {
-        digitalWrite(_pin, LOW);
+        digitalWrite(_pin, HIGH); // Röleyi bırak (Pasif Et)
         _isLocked = true;
         Serial.println("[LOCK] Kapı KILITLI");
     }

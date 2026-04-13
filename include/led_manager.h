@@ -22,18 +22,12 @@ public:
     void success() {
         digitalWrite(_greenPin, HIGH);
         digitalWrite(_redPin, LOW);
-#ifdef MOCK_MODE
-        Serial.println(F("[LED] YESIL Yandi (Basarili)"));
-#endif
     }
 
     /** Hata durumu: Kırmızı LED'i yak, Yeşili söndür */
     void error() {
         digitalWrite(_greenPin, LOW);
         digitalWrite(_redPin, HIGH);
-#ifdef MOCK_MODE
-        Serial.println(F("[LED] KIRMIZI Yandi (Hata)"));
-#endif
     }
 
     /** Hepsi kapalı */
