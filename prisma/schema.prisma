@@ -7,18 +7,17 @@ datasource db {
   url      = "file:./dev.db"
 }
 
-// YENİ TABLOMUZ: Kayıtlı Kullanıcılar
 model User {
-  id          Int      @id @default(autoincrement())
+  id          Int           @id @default(autoincrement())
   name        String
-  email       String   @unique  // Mail adresi benzersiz olmalı
-  password    String            // Şifre alanı
-  role        String   @default("USER") // "ADMIN" veya "USER"
-  enrolled_at DateTime @default(now())
+  email       String        @unique
+  password    String
+  role        String        @default("USER")
+  enrolled_at DateTime      @default(now())
   logs        Log[]
+  deviceTokens DeviceToken[]
 }
 
-// GÜNCELLENEN TABLOMUZ: Loglar
 model Log {
   id         Int      @id @default(autoincrement())
   success    Boolean
@@ -27,4 +26,44 @@ model Log {
   fail_count Int      @default(0)
   user_id    Int?
   user       User?    @relation(fields: [user_id], references: [id])
+  alert      Alert?
+}
+
+model Alert {
+  id         Int            @id @default(autoincrement())
+  type       String
+  severity   String
+  title      String
+  detail     String
+  status     String         @default("UNREAD")
+  log_id     Int?           @unique
+  log        Log?           @relation(fields: [log_id], references: [id])
+  created_at DateTime       @default(now())
+  deliveries PushDelivery[]
+}
+
+model DeviceToken {
+  id         Int            @id @default(autoincrement())
+  token      String         @unique
+  user_id    Int?
+  user       User?          @relation(fields: [user_id], references: [id])
+  platform   String         @default("ios")
+  is_active  Boolean        @default(true)
+  created_at DateTime       @default(now())
+  deliveries PushDelivery[]
+}
+
+model PushDelivery {
+  id              Int      @id @default(autoincrement())
+  alert_id        Int
+  device_token_id Int
+  status          String   @default("PENDING")
+  attempts        Int      @default(0)
+  last_error      String?
+  sent_at         DateTime?
+  next_retry_at   DateTime @default(now())
+  alert           Alert       @relation(fields: [alert_id], references: [id])
+  deviceToken     DeviceToken @relation(fields: [device_token_id], references: [id])
+
+  @@unique([alert_id, device_token_id])
 }
