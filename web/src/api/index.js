@@ -7,7 +7,7 @@ async function request(method, path, body) {
     body: body ? JSON.stringify(body) : undefined,
   })
   const data = await res.json()
-  if (!res.ok) throw new Error(data.error || "Bir hata oluştu")
+  if (!res.ok) throw new Error(data.error || "An error occurred")
   return data
 }
 

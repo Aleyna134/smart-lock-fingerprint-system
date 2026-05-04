@@ -126,12 +126,69 @@ function buildAlertPayloadFromLog(log) {
     const isCritical = Number(log.fail_count || 0) >= 3;
     const type = isCritical ? 'MULTIPLE_FAILED_ATTEMPTS' : 'UNAUTHORIZED_ACCESS';
     const severity = isCritical ? 'CRITICAL' : 'WARNING';
-    const title = isCritical ? 'Coklu hatali giris denemesi' : 'Yetkisiz erisim denemesi';
+    const title = isCritical ? 'Multiple failed access attempts' : 'Unauthorized access attempt';
     const detail = isCritical
-        ? `Kisa surede ${log.fail_count} basarisiz giris denemesi algilandi.`
-        : `Tanimsiz parmak izi denemesi algilandi. Durum: ${log.status}`;
+        ? `${log.fail_count} failed access attempts were detected in a short period.`
+        : `An unknown fingerprint attempt was detected. Status: ${log.status}`;
 
     return { type, severity, title, detail };
+}
+
+function normalizeAccessStatus(status) {
+    const rawStatus = String(status || '').trim();
+    const normalized = rawStatus
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[\u0131\u0130]/g, 'i')
+        .replace(/[\u015F\u015E]/g, 's')
+        .replace(/[\u011F\u011E]/g, 'g')
+        .replace(/[\u00FC\u00DC]/g, 'u')
+        .replace(/[\u00F6\u00D6]/g, 'o')
+        .replace(/[\u00E7\u00C7]/g, 'c');
+
+    const labels = {
+        'hatali parmak izi': 'Failed fingerprint',
+        'parmak izi dogrulanamadi': 'Fingerprint could not be verified',
+        'yetkisiz erisim': 'Unauthorized access',
+        'yetkisiz erisim girisimi': 'Unauthorized access attempt',
+        'yetkisiz giris': 'Unauthorized access',
+        'yetkisiz giris girisimi': 'Unauthorized access attempt',
+        'parmak izi dogrulanadi': 'Fingerprint verified',
+        'coklu hatali giris denemesi': 'Multiple failed access attempts',
+        'basarili giris': 'Successful access',
+        'basarili erisim': 'Successful access',
+        'kilit acildi': 'Unlocked',
+        'kilitli': 'Locked'
+    };
+
+    return labels[normalized] || rawStatus;
+}
+
+function normalizeAlertForResponse(alert) {
+    if (!alert) return alert;
+
+    const title = normalizeAccessStatus(alert.title);
+    const detail = String(alert.detail || '')
+        .replace(/Tanimsiz parmak izi denemesi algilandi\. Durum: /g, 'An unknown fingerprint attempt was detected. Status: ')
+        .replace(/Kisa surede (\d+) basarisiz giris denemesi algilandi\./g, '$1 failed access attempts were detected in a short period.')
+        .replace(/Coklu hatali giris denemesi/g, 'Multiple failed access attempts')
+        .replace(/Yetkisiz erisim girisimi/g, 'Unauthorized access attempt')
+        .replace(/Yetkisiz erisim/g, 'Unauthorized access')
+        .replace(/Parmak izi dogrulanamadi/g, 'Fingerprint could not be verified')
+        .replace(/Parmak izi dogrulanadi/g, 'Fingerprint verified')
+        .replace(/Hatali parmak izi/g, 'Failed fingerprint');
+
+    return { ...alert, title, detail };
+}
+
+function normalizeLogForResponse(log) {
+    if (!log) return log;
+    return {
+        ...log,
+        status: normalizeAccessStatus(log.status),
+        alert: normalizeAlertForResponse(log.alert)
+    };
 }
 
 function buildApnsPayload(alert, unreadCount) {
@@ -142,7 +199,7 @@ function buildApnsPayload(alert, unreadCount) {
                 body: alert.detail
             },
             badge: unreadCount,
-            sound: 'default'
+            sound: 'alert.wav'
         },
         alert_id: alert.id,
         alert_type: alert.type,
@@ -425,7 +482,7 @@ app.post('/api/access-log', async (req, res) => {
         const newLog = await prisma.log.create({
             data: {
                 success: Boolean(success),
-                status: String(status),
+                status: normalizeAccessStatus(status),
                 fail_count: Number(fail_count || 0),
                 user_id: user_id ? Number(user_id) : null
             }
@@ -451,7 +508,7 @@ app.post('/api/access-log', async (req, res) => {
         res.status(201).json(newLog);
     } catch (error) {
         console.error('Log kaydetme hatasi:', error);
-        res.status(500).json({ error: 'Log kaydedilemedi.' });
+        res.status(500).json({ error: 'Log could not be saved.' });
     }
 });
 
@@ -462,18 +519,18 @@ app.post('/api/device-token', async (req, res) => {
         const normalizedToken = String(token || '').trim().toLowerCase();
 
         if (!normalizedToken) {
-            return res.status(400).json({ error: 'token zorunludur.' });
+            return res.status(400).json({ error: 'Token is required.' });
         }
 
         if (!/^[a-f0-9]{40,256}$/.test(normalizedToken)) {
-            return res.status(400).json({ error: 'token formatı geçersiz.' });
+            return res.status(400).json({ error: 'Token format is invalid.' });
         }
 
         let resolvedUserId = null;
         if (user_id !== undefined && user_id !== null) {
             resolvedUserId = Number(user_id);
             if (Number.isNaN(resolvedUserId)) {
-                return res.status(400).json({ error: 'user_id sayısal olmalıdır.' });
+                return res.status(400).json({ error: 'user_id must be numeric.' });
             }
 
             const user = await prisma.user.findUnique({ where: { id: resolvedUserId } });
@@ -511,13 +568,13 @@ app.post('/api/device-token', async (req, res) => {
         );
 
         return res.status(existing ? 200 : 201).json({
-            message: existing ? 'Token güncellendi.' : 'Token kaydedildi.',
+            message: existing ? 'Token updated.' : 'Token registered.',
             token_id: savedToken.id,
             queued_unread_alerts: queuedUnread
         });
     } catch (error) {
         console.error('Device token kaydetme hatasi:', error);
-        return res.status(500).json({ error: 'Device token kaydedilemedi.' });
+        return res.status(500).json({ error: 'Device token could not be registered.' });
     }
 });
 
@@ -527,12 +584,12 @@ app.post('/api/users', async (req, res) => {
         const { name, email, password, role, admin_id } = req.body;
 
         if (!admin_id) {
-            return res.status(401).json({ error: 'İşlemi yapan admin_id belirtilmedi.' });
+            return res.status(401).json({ error: 'Acting administrator ID is required.' });
         }
 
         const requester = await prisma.user.findUnique({ where: { id: Number(admin_id) } });
         if (!requester || requester.role !== 'ADMIN') {
-            return res.status(403).json({ error: 'Yetkisiz işlem. Sadece adminler kullanıcı ekleyebilir.' });
+            return res.status(403).json({ error: 'Unauthorized action. Only administrators can add users.' });
         }
 
         const hashedPassword = await bcrypt.hash(password, 10);
@@ -547,12 +604,12 @@ app.post('/api/users', async (req, res) => {
         });
 
         res.status(201).json({
-            message: 'Kullanıcı başarıyla oluşturuldu',
+            message: 'User created successfully.',
             user: { id: newUser.id, name: newUser.name, email: newUser.email, role: newUser.role }
         });
     } catch (error) {
         console.error(error);
-        res.status(500).json({ error: 'Kullanıcı oluşturulamadı. Mail adresi kullanımda olabilir.' });
+        res.status(500).json({ error: 'User could not be created. The email address may already be in use.' });
     }
 });
 
@@ -563,12 +620,12 @@ app.post('/api/login', async (req, res) => {
         const user = await prisma.user.findUnique({ where: { email: String(email) } });
 
         if (user && await bcrypt.compare(String(password), user.password)) {
-            res.json({ message: 'Giriş başarılı', user_id: user.id, name: user.name, role: user.role });
+            res.json({ message: 'Login successful.', user_id: user.id, name: user.name, role: user.role });
         } else {
-            res.status(401).json({ error: 'Hatalı mail veya şifre' });
+            res.status(401).json({ error: 'Invalid email or password.' });
         }
     } catch (error) {
-        res.status(500).json({ error: 'Giriş işlemi sırasında bir hata oluştu.' });
+        res.status(500).json({ error: 'An error occurred during login.' });
     }
 });
 
@@ -580,7 +637,7 @@ app.get('/api/users', async (req, res) => {
         });
         res.json(users);
     } catch (error) {
-        res.status(500).json({ error: 'Kullanıcılar getirilemedi.' });
+        res.status(500).json({ error: 'Users could not be loaded.' });
     }
 });
 
@@ -589,9 +646,9 @@ app.delete('/api/users/:id', async (req, res) => {
     try {
         const { id } = req.params;
         await prisma.user.delete({ where: { id: Number(id) } });
-        res.json({ message: 'Kullanıcı başarıyla silindi.' });
+        res.json({ message: 'User deleted successfully.' });
     } catch (error) {
-        res.status(500).json({ error: 'Kullanıcı silinirken bir hata oluştu.' });
+        res.status(500).json({ error: 'User could not be deleted.' });
     }
 });
 
@@ -600,13 +657,14 @@ app.get('/api/logs', async (req, res) => {
     try {
         const logs = await prisma.log.findMany({
             include: {
-                user: { select: { id: true, name: true, email: true, role: true } }
+                user: { select: { id: true, name: true, email: true, role: true } },
+                alert: true
             },
             orderBy: { time: 'desc' }
         });
-        res.json(logs);
+        res.json(logs.map(normalizeLogForResponse));
     } catch (error) {
-        res.status(500).json({ error: 'Loglar getirilemedi.' });
+        res.status(500).json({ error: 'Logs could not be loaded.' });
     }
 });
 
@@ -620,9 +678,9 @@ app.get('/api/alerts', async (req, res) => {
             take: limit
         });
 
-        res.json(alerts);
+        res.json(alerts.map(normalizeAlertForResponse));
     } catch (error) {
-        res.status(500).json({ error: 'Alert listesi alınamadı.' });
+        res.status(500).json({ error: 'Alerts could not be loaded.' });
     }
 });
 
@@ -635,7 +693,7 @@ app.patch('/api/alerts/read-all', async (req, res) => {
         });
         return res.json({ updated: result.count });
     } catch (error) {
-        return res.status(500).json({ error: 'Alertler güncellenemedi.' });
+        return res.status(500).json({ error: 'Alerts could not be updated.' });
     }
 });
 
@@ -644,7 +702,7 @@ app.patch('/api/alerts/:id/read', async (req, res) => {
     try {
         const alertId = Number(req.params.id);
         if (Number.isNaN(alertId)) {
-            return res.status(400).json({ error: 'Geçersiz alert id.' });
+            return res.status(400).json({ error: 'Invalid alert ID.' });
         }
 
         const updated = await prisma.alert.update({
@@ -654,7 +712,7 @@ app.patch('/api/alerts/:id/read', async (req, res) => {
 
         return res.json(updated);
     } catch (error) {
-        return res.status(500).json({ error: 'Alert güncellenemedi.' });
+        return res.status(500).json({ error: 'Alert could not be updated.' });
     }
 });
 
@@ -684,7 +742,7 @@ app.get('/api/push-queue/status', async (_req, res) => {
             apns_configured: hasApnsConfig()
         });
     } catch (error) {
-        return res.status(500).json({ error: 'Queue durumu alınamadı.' });
+        return res.status(500).json({ error: 'Queue status could not be loaded.' });
     }
 });
 
@@ -694,11 +752,11 @@ app.get('/api/status', async (req, res) => {
         const lastLog = await prisma.log.findFirst({ orderBy: { time: 'desc' } });
         res.json({
             lock_status: lastLog?.success ? 'Unlocked' : 'Locked',
-            last_event: lastLog?.status || 'No activity',
+            last_event: normalizeAccessStatus(lastLog?.status) || 'No activity',
             fail_count: lastLog?.fail_count || 0
         });
     } catch (error) {
-        res.status(500).json({ error: 'Sistem durumu alınamadı.' });
+        res.status(500).json({ error: 'System status could not be loaded.' });
     }
 });
 

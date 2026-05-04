@@ -33,23 +33,23 @@ export default function LoginPage() {
         {/* Header */}
         <div className="text-center mb-10">
           <div className="inline-flex items-center justify-center w-20 h-20 bg-blue-600/20 rounded-3xl mb-5">
-            <span className="text-5xl">🔒</span>
+            <span className="text-2xl font-bold text-blue-300">SL</span>
           </div>
           <h1 className="text-3xl font-bold text-white">Smart Lock</h1>
-          <p className="text-gray-400 mt-1 text-sm">Biyometrik Erişim Kontrol</p>
+          <p className="text-gray-400 mt-1 text-sm">Biometric Access Control</p>
         </div>
 
         {/* Form */}
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1.5">E-posta</label>
+            <label className="block text-sm font-medium text-gray-300 mb-1.5">Email</label>
             <div className="relative">
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">✉</span>
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">@</span>
               <input
                 type="email"
                 value={email}
                 onChange={e => setEmail(e.target.value)}
-                placeholder="ornek@email.com"
+                placeholder="example@email.com"
                 required
                 className="w-full bg-gray-900 border border-gray-700 rounded-xl pl-9 pr-4 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition"
               />
@@ -57,14 +57,14 @@ export default function LoginPage() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1.5">Şifre</label>
+            <label className="block text-sm font-medium text-gray-300 mb-1.5">Password</label>
             <div className="relative">
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">🔑</span>
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">*</span>
               <input
                 type={showPassword ? 'text' : 'password'}
                 value={password}
                 onChange={e => setPassword(e.target.value)}
-                placeholder="••••••••"
+                placeholder="********"
                 required
                 className="w-full bg-gray-900 border border-gray-700 rounded-xl pl-9 pr-10 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition"
               />
@@ -73,7 +73,7 @@ export default function LoginPage() {
                 onClick={() => setShowPassword(v => !v)}
                 className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300 text-xs"
               >
-                {showPassword ? 'Gizle' : 'Göster'}
+                {showPassword ? 'Hide' : 'Show'}
               </button>
             </div>
           </div>
@@ -89,7 +89,7 @@ export default function LoginPage() {
             disabled={loading}
             className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white font-semibold py-3 rounded-xl transition text-sm mt-2"
           >
-            {loading ? 'Giriş yapılıyor...' : 'Giriş Yap'}
+            {loading ? 'Signing in...' : 'Sign In'}
           </button>
         </form>
       </div>

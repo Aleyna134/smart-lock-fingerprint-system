@@ -1,14 +1,15 @@
 import { useEffect, useState } from 'react'
-import { Outlet, NavLink, useNavigate } from 'react-router-dom'
+import { Outlet, NavLink } from 'react-router-dom'
 import { useSession } from '../context/SessionContext'
 import { api } from '../api'
+import { formatDateTime, formatStatus } from '../utils/format'
 
 const navItems = [
-  { to: '/dashboard', label: 'Dashboard', icon: '⊞' },
-  { to: '/logs', label: 'Erişim Kayıtları', icon: '📋' },
-  { to: '/users', label: 'Kullanıcılar', icon: '👥' },
-  { to: '/alerts', label: 'Uyarılar', icon: '🔔' },
-  { to: '/settings', label: 'Ayarlar', icon: '⚙️' },
+  { to: '/dashboard', label: 'Dashboard', icon: '[]' },
+  { to: '/logs', label: 'Access Logs', icon: 'L' },
+  { to: '/users', label: 'Users', icon: 'U' },
+  { to: '/alerts', label: 'Alerts', icon: 'A' },
+  { to: '/settings', label: 'Settings', icon: 'S' },
 ]
 
 const STORAGE_KEY = 'smartlock_last_seen'
@@ -29,7 +30,7 @@ export default function Layout() {
       if (newFailed.length > 0) setFailedSince(newFailed)
     }).catch(() => {})
 
-    // Bu ziyareti kaydet
+    // Store the current visit timestamp.
     localStorage.setItem(STORAGE_KEY, new Date().toISOString())
   }, [])
 
@@ -43,11 +44,11 @@ export default function Layout() {
         <div className="px-6 py-5 border-b border-gray-800">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 bg-blue-600 rounded-xl flex items-center justify-center text-lg">
-              🔒
+              SL
             </div>
             <div>
               <p className="text-sm font-bold text-white leading-tight">Smart Lock</p>
-              <p className="text-xs text-gray-400">Erişim Kontrol</p>
+              <p className="text-xs text-gray-400">Access Control</p>
             </div>
           </div>
         </div>
@@ -99,20 +100,20 @@ export default function Layout() {
           <div className="bg-gray-900 border border-red-800 rounded-2xl w-full max-w-md shadow-2xl overflow-hidden">
             {/* Red top bar */}
             <div className="bg-red-600 px-6 py-4 flex items-center gap-3">
-              <span className="text-2xl">⚠️</span>
+              <span className="text-2xl">!</span>
               <div>
-                <p className="text-white font-bold text-base">Güvenlik Uyarısı</p>
-                <p className="text-red-200 text-xs mt-0.5">Bu uyarıyı onaylamadan devam edemezsiniz</p>
+                <p className="text-white font-bold text-base">Security Alert</p>
+                <p className="text-red-200 text-xs mt-0.5">You must acknowledge this alert before continuing</p>
               </div>
             </div>
 
             {/* Content */}
             <div className="px-6 py-5">
               <p className="text-white text-sm font-semibold mb-1">
-                Siz yokken <span className="text-red-400">{failedSince.length} başarısız giriş denemesi</span> tespit edildi.
+                <span className="text-red-400">{failedSince.length} failed access attempt{failedSince.length === 1 ? '' : 's'}</span> detected while you were away.
               </p>
               <p className="text-gray-400 text-xs mb-5">
-                Son deneme: {new Date(failedSince[0].time).toLocaleString('tr-TR')}
+                Latest attempt: {formatDateTime(failedSince[0].time)}
               </p>
 
               {/* Failed log list */}
@@ -120,14 +121,14 @@ export default function Layout() {
                 {failedSince.map(log => (
                   <div key={log.id} className="px-4 py-3 flex items-center justify-between">
                     <div>
-                      <p className="text-sm text-red-300 font-medium">{log.status}</p>
+                      <p className="text-sm text-red-300 font-medium">{formatStatus(log.status)}</p>
                       <p className="text-xs text-gray-500 mt-0.5">
-                        {new Date(log.time).toLocaleString('tr-TR')}
+                        {formatDateTime(log.time)}
                       </p>
                     </div>
                     {log.fail_count > 0 && (
                       <span className="text-xs bg-red-500/15 text-red-400 border border-red-500/20 px-2 py-0.5 rounded-md">
-                        {log.fail_count} deneme
+                        {log.fail_count} attempt{log.fail_count === 1 ? '' : 's'}
                       </span>
                     )}
                   </div>
@@ -141,13 +142,13 @@ export default function Layout() {
                   onClick={() => setDismissed(true)}
                   className="flex-1 bg-red-600 hover:bg-red-500 text-white text-sm font-semibold py-3 rounded-xl transition text-center"
                 >
-                  Kayıtları İncele
+                  Review Logs
                 </NavLink>
                 <button
                   onClick={() => setDismissed(true)}
                   className="flex-1 bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm py-3 rounded-xl transition"
                 >
-                  Anladım, Kapat
+                  Got it, Close
                 </button>
               </div>
             </div>

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { api } from '../api'
 import { useSession } from '../context/SessionContext'
+import { formatDate } from '../utils/format'
 
 export default function UsersPage() {
   const { session } = useSession()
@@ -44,14 +45,14 @@ export default function UsersPage() {
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-xl font-bold text-white">Kullanıcılar</h1>
-          <p className="text-sm text-gray-500 mt-0.5">{users.length} kullanıcı</p>
+          <h1 className="text-xl font-bold text-white">Users</h1>
+          <p className="text-sm text-gray-500 mt-0.5">{users.length} user{users.length === 1 ? '' : 's'}</p>
         </div>
         <button
           onClick={() => setShowAdd(true)}
           className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition flex items-center gap-2"
         >
-          + Kullanıcı Ekle
+          + Add User
         </button>
       </div>
 
@@ -63,7 +64,7 @@ export default function UsersPage() {
 
       {/* Admins */}
       <Section
-        title="Yöneticiler"
+        title="Administrators"
         count={admins.length}
         users={admins}
         loading={loading}
@@ -74,7 +75,7 @@ export default function UsersPage() {
 
       {/* Users */}
       <Section
-        title="Kullanıcılar"
+        title="Users"
         count={regulars.length}
         users={regulars}
         loading={loading}
@@ -101,38 +102,38 @@ export default function UsersPage() {
                   <p className="text-xs text-gray-500">{selectedUser.email}</p>
                 </div>
               </div>
-              <button onClick={() => setSelectedUser(null)} className="text-gray-500 hover:text-gray-300">✕</button>
+              <button onClick={() => setSelectedUser(null)} className="text-gray-500 hover:text-gray-300">X</button>
             </div>
             <div className="px-6 py-4 space-y-3 text-sm">
               <Row label="ID" value={`#${selectedUser.id}`} />
-              <Row label="Rol" value={
+              <Row label="Role" value={
                 <span className={`px-2 py-0.5 rounded-md text-xs font-medium ${
                   selectedUser.role === 'ADMIN'
                     ? 'bg-purple-500/15 text-purple-400 border border-purple-500/20'
                     : 'bg-blue-500/15 text-blue-400 border border-blue-500/20'
                 }`}>{selectedUser.role}</span>
               } />
-              <Row label="Kayıt Tarihi" value={new Date(selectedUser.enrolled_at).toLocaleDateString('tr-TR', { day: 'numeric', month: 'long', year: 'numeric' })} />
+              <Row label="Registration Date" value={formatDate(selectedUser.enrolled_at, { day: 'numeric', month: 'long', year: 'numeric' })} />
             </div>
             {selectedUser.id !== session?.id && (
               <div className="px-6 pb-5">
                 {deleteConfirm?.id === selectedUser.id ? (
                   <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-4">
                     <p className="text-sm text-red-300 mb-3">
-                      <strong>{selectedUser.name}</strong> silinecek. Bu işlem geri alınamaz.
+                      <strong>{selectedUser.name}</strong> will be deleted. This action cannot be undone.
                     </p>
                     <div className="flex gap-2">
                       <button
                         onClick={() => handleDelete(selectedUser)}
                         className="flex-1 bg-red-600 hover:bg-red-500 text-white py-2 rounded-lg text-sm font-medium transition"
                       >
-                        Evet, Sil
+                        Yes, Delete
                       </button>
                       <button
                         onClick={() => setDeleteConfirm(null)}
                         className="flex-1 bg-gray-800 hover:bg-gray-700 text-gray-300 py-2 rounded-lg text-sm transition"
                       >
-                        İptal
+                        Cancel
                       </button>
                     </div>
                   </div>
@@ -141,7 +142,7 @@ export default function UsersPage() {
                     onClick={() => setDeleteConfirm(selectedUser)}
                     className="w-full border border-red-500/30 hover:bg-red-500/10 text-red-400 py-2.5 rounded-xl text-sm transition"
                   >
-                    Kullanıcıyı Sil
+                    Delete User
                   </button>
                 )}
               </div>
@@ -172,18 +173,18 @@ function Section({ title, count, users, loading, onSelect }) {
       <table className="w-full text-sm">
         <thead>
           <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-800">
-            <th className="text-left px-5 py-3 font-medium">Ad</th>
-            <th className="text-left px-5 py-3 font-medium">E-posta</th>
-            <th className="text-left px-5 py-3 font-medium">Rol</th>
-            <th className="text-left px-5 py-3 font-medium">Kayıt Tarihi</th>
+            <th className="text-left px-5 py-3 font-medium">Name</th>
+            <th className="text-left px-5 py-3 font-medium">Email</th>
+            <th className="text-left px-5 py-3 font-medium">Role</th>
+            <th className="text-left px-5 py-3 font-medium">Registration Date</th>
           </tr>
         </thead>
         <tbody>
           {loading && (
-            <tr><td colSpan={4} className="text-center text-gray-500 py-8">Yükleniyor...</td></tr>
+            <tr><td colSpan={4} className="text-center text-gray-500 py-8">Loading...</td></tr>
           )}
           {!loading && users.length === 0 && (
-            <tr><td colSpan={4} className="text-center text-gray-500 py-8">Kullanıcı yok</td></tr>
+            <tr><td colSpan={4} className="text-center text-gray-500 py-8">No users</td></tr>
           )}
           {users.map(user => (
             <tr
@@ -210,7 +211,7 @@ function Section({ title, count, users, loading, onSelect }) {
                 </span>
               </td>
               <td className="px-5 py-3.5 text-gray-500 text-xs">
-                {new Date(user.enrolled_at).toLocaleDateString('tr-TR')}
+                {formatDate(user.enrolled_at)}
               </td>
             </tr>
           ))}
@@ -253,41 +254,41 @@ function AddUserModal({ adminId, onClose, onSuccess }) {
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-gray-800">
-          <h2 className="text-base font-bold text-white">Yeni Kullanıcı</h2>
-          <button onClick={onClose} className="text-gray-500 hover:text-gray-300">✕</button>
+          <h2 className="text-base font-bold text-white">New User</h2>
+          <button onClick={onClose} className="text-gray-500 hover:text-gray-300">X</button>
         </div>
         <form onSubmit={handleSubmit} className="px-6 py-5 space-y-4">
-          <Field label="Ad Soyad">
+          <Field label="Full Name">
             <input
               type="text" required value={form.name}
               onChange={e => set('name', e.target.value)}
-              placeholder="Ahmet Yılmaz"
+              placeholder="Alex Morgan"
               className="input"
             />
           </Field>
-          <Field label="E-posta">
+          <Field label="Email">
             <input
               type="email" required value={form.email}
               onChange={e => set('email', e.target.value)}
-              placeholder="ahmet@email.com"
+              placeholder="alex@email.com"
               className="input"
             />
           </Field>
-          <Field label="Şifre">
+          <Field label="Password">
             <input
               type="password" required value={form.password}
               onChange={e => set('password', e.target.value)}
-              placeholder="••••••••"
+              placeholder="********"
               className="input"
             />
           </Field>
-          <Field label="Rol">
+          <Field label="Role">
             <select
               value={form.role}
               onChange={e => set('role', e.target.value)}
               className="input"
             >
-              <option value="USER">Kullanıcı</option>
+              <option value="USER">User</option>
               <option value="ADMIN">Admin</option>
             </select>
           </Field>
@@ -301,11 +302,11 @@ function AddUserModal({ adminId, onClose, onSuccess }) {
           <div className="flex gap-3 pt-1">
             <button type="button" onClick={onClose}
               className="flex-1 bg-gray-800 hover:bg-gray-700 text-gray-300 py-2.5 rounded-xl text-sm transition">
-              İptal
+              Cancel
             </button>
             <button type="submit" disabled={loading}
               className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white py-2.5 rounded-xl text-sm font-medium transition">
-              {loading ? 'Ekleniyor...' : 'Ekle'}
+              {loading ? 'Adding...' : 'Add'}
             </button>
           </div>
         </form>
