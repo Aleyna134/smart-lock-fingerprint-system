@@ -25,8 +25,8 @@ public:
 
     bool init() {
         Wire.begin(I2C_SDA, I2C_SCL);
-        Wire.setClock(100000); // 100kHz (Standart Hiz)
-        delay(100); 
+        Wire.setClock(50000); // 50kHz (Gürültü ve kablo kayıplarını önlemek için yavaşlatıldı)
+        delay(200); 
 
         _lcd.init();
         _lcd.backlight();

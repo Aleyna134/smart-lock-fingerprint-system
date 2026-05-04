@@ -11,8 +11,8 @@ public:
     LockManager(int pin = LOCK_RELAY_PIN) : _pin(pin), _isLocked(true) {}
 
     void init() {
-        pinMode(_pin, OUTPUT);
-        digitalWrite(_pin, HIGH); // Başlangıçta kilidi kapalı tut (HIGH = Röle Bırakır)
+        pinMode(_pin, OUTPUT_OPEN_DRAIN); // 5V Röle sızıntısını önlemek için Açık Drenaj (Open Drain)
+        digitalWrite(_pin, HIGH); // Başlangıçta kilidi kapalı tut (HIGH = Pin boşlukta, Akım geçmez)
         _isLocked = true;
     }
 
