@@ -13,6 +13,119 @@
  */
 
 #include "fingerprint.h"
+#include <Preferences.h>
+
+// ESP32 NVS depolama — sensörün bozuk flash'ını bypass eder
+static Preferences fpStore;
+
+// UpChar: Sensörün CharBuffer'ından veriyi ESP32'ye yükle
+// Adafruit kütüphanesinin paket buffer'ı 64 byte — sensör 128+ byte paket gönderiyor.
+// Bu yüzden Serial2'den doğrudan (raw) okuyoruz.
+static bool upCharToESP32(Adafruit_Fingerprint* finger, uint8_t bufId, uint8_t* outBuf, uint16_t* outLen) {
+    // UpChar komutunu gönder (kütüphanenin getModel() fonksiyonu)
+    uint8_t p = finger->getModel();
+    Serial.printf("[FP] UpChar ACK: %d\n", p);
+    if (p != FINGERPRINT_OK) {
+        delay(500);
+        while (Serial2.available()) Serial2.read();
+        return false;
+    }
+
+    // Ham UART okuma — R307 paket formatı:
+    // [0xEF 0x01] [4-byte adres] [1-byte tip] [2-byte uzunluk] [veri...] [2-byte checksum]
+    *outLen = 0;
+    int pktCount = 0;
+    unsigned long totalTimeout = millis() + 8000;
+
+    while (millis() < totalTimeout && pktCount < 20) {
+        // Header bul: 0xEF 0x01
+        bool headerFound = false;
+        unsigned long hdrTimeout = millis() + 3000;
+        while (millis() < hdrTimeout) {
+            if (!Serial2.available()) { delay(1); continue; }
+            if (Serial2.read() != 0xEF) continue;
+            // 0xEF bulundu, 0x01 bekle
+            unsigned long t2 = millis() + 500;
+            while (!Serial2.available() && millis() < t2) delay(1);
+            if (!Serial2.available()) break;
+            if (Serial2.read() == 0x01) { headerFound = true; break; }
+        }
+        if (!headerFound) break;
+
+        // Adres (4 byte) — oku ve atla
+        for (int i = 0; i < 4; i++) {
+            unsigned long t = millis() + 500;
+            while (!Serial2.available() && millis() < t) delay(1);
+            if (Serial2.available()) Serial2.read();
+        }
+
+        // Tip (1 byte)
+        unsigned long t = millis() + 500;
+        while (!Serial2.available() && millis() < t) delay(1);
+        uint8_t pktType = Serial2.available() ? Serial2.read() : 0xFF;
+
+        // Uzunluk (2 byte) — checksum dahil
+        t = millis() + 500;
+        while (Serial2.available() < 2 && millis() < t) delay(1);
+        uint8_t lenH = Serial2.available() ? Serial2.read() : 0;
+        uint8_t lenL = Serial2.available() ? Serial2.read() : 0;
+        uint16_t pktLen = ((uint16_t)lenH << 8) | lenL;
+        uint16_t payloadLen = (pktLen > 2) ? (pktLen - 2) : 0;
+
+        // Veri (payloadLen byte)
+        for (uint16_t i = 0; i < payloadLen; i++) {
+            t = millis() + 500;
+            while (!Serial2.available() && millis() < t) delay(1);
+            if (!Serial2.available()) break;
+            uint8_t b = Serial2.read();
+            if (*outLen < 1024) outBuf[(*outLen)++] = b;
+        }
+
+        // Checksum (2 byte) — oku ve atla
+        for (int i = 0; i < 2; i++) {
+            t = millis() + 500;
+            while (!Serial2.available() && millis() < t) delay(1);
+            if (Serial2.available()) Serial2.read();
+        }
+
+        pktCount++;
+        Serial.printf("[FP] UpChar pkt %d: type=0x%02X, payload=%d, total=%d\n",
+                      pktCount, pktType, payloadLen, *outLen);
+
+        if (pktType == 0x08) break; // ENDDATAPACKET
+    }
+
+    // Kalan veriyi temizle
+    delay(100);
+    while (Serial2.available()) Serial2.read();
+
+    Serial.printf("[FP] UpChar toplam: %d paket, %d byte\n", pktCount, *outLen);
+    return (*outLen > 0);
+}
+
+// DownChar: ESP32'den sensörün CharBuffer'ına veri indir
+// R307 DownChar komutu (0x09): host → sensör, data paketleri halinde
+static bool downCharToSensor(Adafruit_Fingerprint* finger, uint8_t bufId, const uint8_t* data, uint16_t len) {
+    uint8_t cmd[] = {0x09, bufId};
+    Adafruit_Fingerprint_Packet pkt(FINGERPRINT_COMMANDPACKET, sizeof(cmd), cmd);
+    finger->writeStructuredPacket(pkt);
+    if (finger->getStructuredPacket(&pkt) != FINGERPRINT_OK) return false;
+    if (pkt.data[0] != FINGERPRINT_OK) return false;
+
+    // Veriyi 64-byte'lık parçalar halinde gönder (kütüphanenin paket boyutu 64)
+    // Son paket ENDDATAPACKET, diğerleri DATAPACKET
+    uint16_t offset = 0;
+    while (offset < len) {
+        uint16_t chunkLen = len - offset;
+        if (chunkLen > 64) chunkLen = 64;
+        uint8_t pktType = (offset + chunkLen >= len) ? FINGERPRINT_ENDDATAPACKET : FINGERPRINT_DATAPACKET;
+        Adafruit_Fingerprint_Packet dataPkt(pktType, chunkLen, (uint8_t*)(data + offset));
+        finger->writeStructuredPacket(dataPkt);
+        offset += chunkLen;
+        delay(5);
+    }
+    return true;
+}
 
 // ============================================================================
 // Mock Mod Yardımcıları
@@ -230,54 +343,39 @@ bool FingerprintManager::enrollFingerprint(int id) {
     Serial.printf("[FP] Kayit baslatiliyor - ID: %d\n", id);
     Serial.println("[FP] Lutfen parmaGInIzI sensore koyun...");
 
-    // ----- Adım 1: İlk görüntüyü al -----
+    // ----- Adım 1: Görüntü al ve karakter dosyası oluştur -----
     int result = captureAndCreateCharFile(1);
     if (result != FINGERPRINT_OK) {
-        Serial.println("[FP] HATA: Ilk goruntu alinamadi: " + errorToString(result));
+        Serial.println("[FP] HATA: Goruntu alinamadi");
         return false;
     }
-    Serial.println("[FP] Ilk goruntu alindi. Lutfen parmaGInIzI kaldirin...");
-    delay(2000);
+    Serial.println("[FP] Goruntu alindi.");
 
-    // Parmağın kaldırılmasını bekle (10 saniye timeout)
-    unsigned long liftStart = millis();
-    while (_finger->getImage() != FINGERPRINT_NOFINGER) {
-        if (millis() - liftStart > 10000) {
-            Serial.println("[FP] HATA: Parmak kaldirilamadi, kayit iptal!");
-            return false;
-        }
-        delay(100);
-    }
-
-    // ----- Adım 2: İkinci görüntüyü al -----
-    Serial.println("[FP] Ayni parmaGI tekrar koyun...");
-    result = captureAndCreateCharFile(2);
-    if (result != FINGERPRINT_OK) {
-        Serial.println("[FP] HATA: Ikinci goruntu alinamadi: " + errorToString(result));
+    // ----- Adım 2: UpChar ile karakter dosyasını ESP32'ye çek -----
+    // Sensörün flash'ı bozuk, bu yüzden veriyi ESP32 NVS'e kaydediyoruz.
+    uint8_t charData[1024];
+    uint16_t charLen = 0;
+    if (!upCharToESP32(_finger, 0x01, charData, &charLen)) {
+        Serial.println("[FP] HATA: UpChar basarisiz!");
         return false;
     }
+    Serial.printf("[FP] UpChar OK - %d byte okundu\n", charLen);
 
-    // ----- Adım 3: İki şablondan model oluştur -----
-    result = _finger->createModel();
-    if (result != FINGERPRINT_OK) {
-        Serial.println("[FP] HATA: Model olusturulamadi (parmaklar uyusmadi): "
-                       + errorToString(result));
-        return false;
+    // ----- Adım 3: ESP32 NVS'e kaydet -----
+    fpStore.begin("fingerprints", false);
+    String key = "fp_" + String(id);
+    fpStore.putBytes(key.c_str(), charData, charLen);
+    // Kayıt sayısını güncelle
+    int count = fpStore.getInt("count", 0);
+    // ID daha önce yoksa sayacı artır
+    String existKey = "ex_" + String(id);
+    if (!fpStore.getBool(existKey.c_str(), false)) {
+        fpStore.putInt("count", count + 1);
+        fpStore.putBool(existKey.c_str(), true);
     }
+    fpStore.end();
 
-    // ----- Adım 4: Modeli sensör belleğine kaydet -----
-    result = _finger->storeModel(id);
-    if (result != FINGERPRINT_OK) {
-        Serial.println("[FP] HATA: Model kaydedilemedi: " + errorToString(result));
-        return false;
-    }
-
-    // --- TEYİT KONTROLÜ (Arkadaşınızın kodu) ---
-    delay(200);
-    _finger->getTemplateCount();
-    Serial.printf("[FP] TEKID KONTROLU - Toplam kayitli parmak sayisi: %d\n", _finger->templateCount);
-
-    Serial.printf("[FP] BASARILI! Parmak izi ID %d olarak kaydedildi.\n", id);
+    Serial.printf("[FP] BASARILI! ID %d kaydedildi (%d byte NVS'e yazildi).\n", id, charLen);
     return true;
 #endif
 }
@@ -341,52 +439,63 @@ FingerprintResult FingerprintManager::verifyFingerprint() {
     }
     Serial.println("[FP] [1/3] Goruntu alindi OK");
 
-    // Adım 2: Görüntüyü şablon dosyasına dönüştür (slot 1)
+    // Adım 2: Yeni parmağın karakter dosyasını oluştur (CharBuffer2'ye)
     delay(50);
-    p = _finger->image2Tz(1);
-    Serial.printf("[FP] [2/3] image2Tz kodu: %d (%s)\n", p, p == FINGERPRINT_OK ? "OK" : errorToString(p).c_str());
-    if (p != FINGERPRINT_OK) {
-        result.message = "Sablon olusturma hatasi: " + errorToString(p);
-        return result;
+    p = _finger->image2Tz(2);
+    if (p != FINGERPRINT_OK) { result.message = "image2Tz hatasi"; return result; }
+    Serial.println("[FP] [2/3] Karakter dosyasi olusturuldu");
+
+    // Adım 3: NVS'den kayıtlı verileri tek tek DownChar ile sensöre yükle, Match yap
+    // Yeni parmak Buffer2'de. Kayıtlıyı Buffer1'e yüklüyoruz.
+    // İkisi de karakter dosyası formatında → Match çalışır!
+    Serial.println("[FP] [3/3] Eslestirme basliyor...");
+    bool found = false;
+
+    fpStore.begin("fingerprints", true);  // read-only
+
+    for (int id = 1; id <= FP_MAX_TEMPLATES && !found; id++) {
+        String existKey = "ex_" + String(id);
+        if (!fpStore.getBool(existKey.c_str(), false)) continue;
+
+        String key = "fp_" + String(id);
+        uint8_t storedData[1024];
+        size_t storedLen = fpStore.getBytes(key.c_str(), storedData, sizeof(storedData));
+        if (storedLen == 0) continue;
+
+        // DownChar: kayıtlı karakter dosyasını Buffer1'e yükle
+        if (!downCharToSensor(_finger, 0x01, storedData, storedLen)) {
+            Serial.printf("[FP]   ID %d DownChar basarisiz\n", id);
+            continue;
+        }
+
+        // Match (0x03): Buffer1 (NVS'den yüklenen) vs Buffer2 (yeni parmak)
+        uint8_t matchCmd[] = {0x03};
+        Adafruit_Fingerprint_Packet matchPkt(FINGERPRINT_COMMANDPACKET, sizeof(matchCmd), matchCmd);
+        _finger->writeStructuredPacket(matchPkt);
+
+        if (_finger->getStructuredPacket(&matchPkt) != FINGERPRINT_OK) continue;
+        if (matchPkt.type != FINGERPRINT_ACKPACKET) continue;
+
+        Serial.printf("[FP]   ID %d -> Match: %d\n", id, matchPkt.data[0]);
+
+        if (matchPkt.data[0] == FINGERPRINT_OK) {
+            uint16_t score = ((uint16_t)matchPkt.data[1] << 8) | matchPkt.data[2];
+            result.matched    = true;
+            result.user_id    = id;
+            result.confidence = score;
+            found = true;
+            Serial.printf("[FP] ✓ ID %d eslesti! Guven: %d\n", id, score);
+        }
     }
 
-    // Adım 3: Veritabanında ara
-    _finger->getTemplateCount();
-    Serial.printf("[FP] Arama oncesi kayit sayisi: %d\n", _finger->templateCount);
+    fpStore.end();
 
-    // Klon sensörlerde capacity değerini ezmek 23 (Invalid Parameter) hatası verebilir,
-    // o yüzden kendi bildirdiği değeri (örneğin 1000) kullanmasına izin veriyoruz.
-    // _finger->capacity = FP_MAX_TEMPLATES;
-
-    delay(50);
-    // Önce hızlı arama dene
-    p = _finger->fingerFastSearch();
-    Serial.printf("[FP] [3/3] fingerFastSearch kodu: %d\n", p);
-
-    // Eğer hızlı arama eşleşme bulamazsa veya hata verirse normal aramayı dene
-    if (p != FINGERPRINT_OK) {
-        Serial.println("[FP] fingerFastSearch sonuc bulamadi, fingerSearch deneniyor...");
-        delay(50);
-        p = _finger->fingerSearch();
-        Serial.printf("[FP] [3/3] fingerSearch kodu: %d (Arama Kapasitesi: %d)\n", p, _finger->capacity);
-    }
-
-    if (p == FINGERPRINT_OK) {
-        result.matched    = true;
-        result.user_id    = _finger->fingerID;
-        result.confidence = _finger->confidence;
-        result.message    = "Parmak izi eslesti! ID: " + String(result.user_id)
-                          + " | Guven: " + String(result.confidence);
-        Serial.println("[FP] ✓ " + result.message);
-    } else if (p == FINGERPRINT_NOTFOUND) {
-        result.confidence = _finger->confidence;
-        result.message    = "Eslesme yok | Guven: " + String(result.confidence);
+    if (!found) {
+        result.message = "Eslesme bulunamadi";
         Serial.println("[FP] ✗ " + result.message);
-        Serial.println("[FP] -> Parmaginizi daha sert ve tam ortaya basin.");
     } else {
-        // Beklenmedik hata — kodu göster
-        result.message = "Arama hatasi (Kod: " + String(p) + " = " + errorToString(p) + ")";
-        Serial.println("[FP] HATA: " + result.message);
+        result.message = "Parmak izi eslesti! ID: " + String(result.user_id)
+                       + " | Guven: " + String(result.confidence);
     }
 
     return result;
@@ -447,14 +556,16 @@ bool FingerprintManager::deleteAll() {
         return false;
     }
 
-    int result = _finger->emptyDatabase();
-    if (result == FINGERPRINT_OK) {
-        Serial.println("[FP] Tum kayitlar silindi.");
-        return true;
-    } else {
-        Serial.println("[FP] HATA: Toplu silme basarisiz: " + errorToString(result));
-        return false;
-    }
+    // Sensör flash'ını da temizle (bozuk olsa bile)
+    _finger->emptyDatabase();
+
+    // ESP32 NVS'i temizle (asıl verilerimiz burada)
+    fpStore.begin("fingerprints", false);
+    fpStore.clear();
+    fpStore.end();
+
+    Serial.println("[FP] Tum kayitlar silindi (NVS + Sensor).");
+    return true;
 #endif
 }
 
