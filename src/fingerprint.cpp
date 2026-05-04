@@ -102,9 +102,6 @@ FingerprintManager::~FingerprintManager() {
  *     FingerprintManager fp;
  *     fp.init(&Serial2, 16, 17);  // RX=GPIO16, TX=GPIO17
  *
- *   Pin numaraları değiştirilebilir, ESP32 herhangi bir GPIO'yu
- *   UART olarak kullanabilir.
- *
  * @param serial HardwareSerial pointer'ı (örn: &Serial2)
  * @param rxPin  RX pin numarası
  * @param txPin  TX pin numarası
@@ -123,38 +120,76 @@ bool FingerprintManager::init(HardwareSerial* serial, int rxPin, int txPin) {
 #else
     // ---- GERÇEK MOD: UART'ı başlat ve sensörü bul ----
 
-    // İŞLETİM SİSTEMİ BAĞIMSIZ BAŞLATMA (HardwareSerial):
-    // Ekip arkadaşlarının Windows (COM3) veya Linux (/dev/ttyUSB0) kullanması KESİNLİKLE FARK ETMEZ.
-    // İşletim sistemine özgü port isimleri ("COM3", "/dev/tty...") KULLANMIYORUZ.
-    // Doğrudan ESP32'nin donanımsal UART pinlerini (GPIO) argüman olarak vererek başlatıyoruz.
-    // Böylece kod herkesin bilgisayarında ve işletim sisteminde sıfır çakışmayla çalışır.
-    _serial->begin(FP_BAUD_RATE, SERIAL_8N1, _rxPin, _txPin);
-
     // Adafruit Fingerprint nesnesini oluştur
     _finger = new Adafruit_Fingerprint(_serial);
 
-    // Sensör ile el sıkışma (handshake)
-    _finger->begin(FP_BAUD_RATE);
+    // Sensörün uyanması için bekliyoruz (ESP32 hızlı açılır, sensör gecikmeli)
+    Serial.println("[FP] Sensorun acilmasi bekleniyor (2 sn)...");
+    delay(2000);
 
-    // Sensör doğrulama denemesi
-    if (_finger->verifyPassword()) {
-        Serial.println("[FP] Parmak izi sensoru bulundu ve dogrulandi.");
-        _initialized = true;
+    // --- BAUD RATE OTOMATIK TARAMA ---
+    // Fabrikadan gelen R307/ZFM sensörler 9600 veya 57600 baud ile gelebilir.
+    // Her iki hızı da deniyoruz.
+    const uint32_t baudRates[] = {57600, 9600, 115200};
+    const int baudCount = sizeof(baudRates) / sizeof(baudRates[0]);
+    bool found = false;
 
-        // Sensör parametrelerini oku
-        _finger->getParameters();
-        Serial.printf("[FP] Kapasite: %d | Guvenlik: %d\n",
-                      _finger->capacity, _finger->security_level);
+    for (int i = 0; i < baudCount && !found; i++) {
+        uint32_t baud = baudRates[i];
+        Serial.printf("[FP] Deneniyor: %d baud...\n", baud);
 
-        return true;
-    } else {
-        Serial.println("[FP] HATA: Parmak izi sensoru bulunamadi!");
-        Serial.println("[FP] Kablo baglantilarini kontrol edin:");
-        Serial.printf("[FP]   RX Pin: %d, TX Pin: %d, Baud: %d\n",
-                      _rxPin, _txPin, FP_BAUD_RATE);
+        // Portu bu hızda başlat
+        _serial->end();
+        delay(100);
+        _serial->begin(baud, SERIAL_8N1, _rxPin, _txPin);
+        delay(200);
+
+        // Adafruit kütüphanesini bu hızda başlat
+        _finger->begin(baud);
+        delay(300);
+
+        // Buffer'ı temizle
+        while (_serial->available()) _serial->read();
+
+        // Şifreyi doğrula (bu komut sensörün cevap verip vermediğini test eder)
+        if (_finger->verifyPassword()) {
+            Serial.printf("[FP] BASARILI! Sensor %d baud hizinda BULUNDU.\n", baud);
+            found = true;
+
+            // --- GÜVENLİK SEVİYESİ AYARI ---
+            _initialized = true;
+            _finger->getParameters();
+            _finger->setSecurityLevel(1);
+            delay(100);
+
+            // Buffer temizle
+            while (_serial->available()) _serial->read();
+
+            // Zaman aşımını artır (gürültülü hat için)
+            _serial->setTimeout(1000);
+
+            // Bilgileri yazdır
+            _finger->getParameters();
+            Serial.printf("[FP] Kapasite: %d | Guvenlik: %d\n",
+                          _finger->capacity, _finger->security_level);
+        } else {
+            Serial.printf("[FP] %d baud: cevap yok.\n", baud);
+            delay(200);
+        }
+    }
+
+    if (!found) {
+        Serial.println("[FP] HATA: Hicbir baud hizinda sensor bulunamadi!");
+        Serial.println("[FP] Kontrol listesi:");
+        Serial.println("[FP]  1. Sari(TX) -> GPIO16, Gri(RX) -> GPIO17 mi?");
+        Serial.println("[FP]  2. Kirmizi -> 3.3V, Siyah -> GND mi?");
+        Serial.println("[FP]  3. Kablo baglantilari gevşek olmali, soguk lehim?");
+        Serial.printf( "[FP]  4. Kullanilan pinler: RX=%d TX=%d\n", _rxPin, _txPin);
         _initialized = false;
         return false;
     }
+
+    return true;
 #endif
 }
 
@@ -204,8 +239,13 @@ bool FingerprintManager::enrollFingerprint(int id) {
     Serial.println("[FP] Ilk goruntu alindi. Lutfen parmaGInIzI kaldirin...");
     delay(2000);
 
-    // Parmağın kaldırılmasını bekle
+    // Parmağın kaldırılmasını bekle (10 saniye timeout)
+    unsigned long liftStart = millis();
     while (_finger->getImage() != FINGERPRINT_NOFINGER) {
+        if (millis() - liftStart > 10000) {
+            Serial.println("[FP] HATA: Parmak kaldirilamadi, kayit iptal!");
+            return false;
+        }
         delay(100);
     }
 
@@ -274,40 +314,62 @@ FingerprintResult FingerprintManager::verifyFingerprint() {
         return result;
     }
 
-    // Adım 1: Görüntü al
-    int p = _finger->getImage();
-    if (p == FINGERPRINT_NOFINGER) {
-        result.message = "Parmak algilanmadi";
-        return result;
+    // Adım 1: Görüntü al (10 saniye bekle)
+    int p = -1;
+    unsigned long startTime = millis();
+    Serial.println("[FP] Parmak bekleniyor (10 sn)...");
+    
+    while (p != FINGERPRINT_OK) {
+        p = _finger->getImage();
+        if (p == FINGERPRINT_NOFINGER) {
+            if (millis() - startTime > 10000) {
+                result.message = "Zaman asimi: Parmak algilanmadi";
+                Serial.println("[FP] " + result.message);
+                return result;
+            }
+            delay(100);
+        } else if (p != FINGERPRINT_OK) {
+            result.message = "Goruntu alma hatasi: " + errorToString(p);
+            Serial.println("[FP] HATA: " + result.message);
+            return result;
+        }
     }
-    if (p != FINGERPRINT_OK) {
-        result.message = "Goruntu alma hatasi: " + errorToString(p);
-        return result;
-    }
+    Serial.println("[FP] [1/3] Goruntu alindi OK");
 
-    // Adım 2: Görüntüyü şablon dosyasına dönüştür
-    p = _finger->image2Tz();
+    // Adım 2: Görüntüyü şablon dosyasına dönüştür (slot 1)
+    delay(100);
+    p = _finger->image2Tz(1);
+    Serial.printf("[FP] [2/3] image2Tz kodu: %d (%s)\n", p, p == FINGERPRINT_OK ? "OK" : errorToString(p).c_str());
     if (p != FINGERPRINT_OK) {
         result.message = "Sablon olusturma hatasi: " + errorToString(p);
         return result;
     }
 
-    // Adım 3: Veritabanında ara (1:N fast search)
+    // Buffer'ı temizle (kalıntı veri)
+    while (_serial->available()) _serial->read();
+    delay(200);
+
+    // Adım 3: Veritabanında ara — fingerSearch() (0x04 komutu, R307 ile uyumlu)
+    // NOT: fingerFastSearch() (0x1B) bazı R307 klonlarında desteklenmez, "Arama hatasi" döner.
     p = _finger->fingerSearch();
+    Serial.printf("[FP] [3/3] fingerSearch kodu: %d\n", p);
+
     if (p == FINGERPRINT_OK) {
-        // Eşleşme bulundu!
         result.matched    = true;
         result.user_id    = _finger->fingerID;
         result.confidence = _finger->confidence;
-        result.message    = "Parmak izi eslesti - ID: " + String(result.user_id)
-                          + " (Guven: " + String(result.confidence) + ")";
-        Serial.println("[FP] " + result.message);
+        result.message    = "Parmak izi eslesti! ID: " + String(result.user_id)
+                          + " | Guven: " + String(result.confidence);
+        Serial.println("[FP] ✓ " + result.message);
     } else if (p == FINGERPRINT_NOTFOUND) {
-        result.message = "Parmak izi kayitli degil";
-        Serial.println("[FP] Eslesme bulunamadi.");
+        result.confidence = _finger->confidence;
+        result.message    = "Eslesme yok | Guven: " + String(result.confidence);
+        Serial.println("[FP] ✗ " + result.message);
+        Serial.println("[FP] -> Parmaginizi daha sert ve tam ortaya basin.");
     } else {
-        result.message = "Arama hatasi: " + errorToString(p);
-        Serial.println("[FP] " + result.message);
+        // Beklenmedik hata — kodu göster
+        result.message = "Arama hatasi (Kod: " + String(p) + " = " + errorToString(p) + ")";
+        Serial.println("[FP] HATA: " + result.message);
     }
 
     return result;

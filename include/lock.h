@@ -3,8 +3,8 @@
 
 #include <Arduino.h>
 
-/** Röle (Kilit) için varsayılan pin */
-#define LOCK_RELAY_PIN 2
+/** Röle (Kilit) için pin - ESP32 DevKit */
+#define LOCK_RELAY_PIN 26
 
 class LockManager {
 public:

@@ -3,8 +3,8 @@
 
 #include <Arduino.h>
 
-/** Buzzer için varsayılan pin */
-#define BUZZER_PIN 0
+/** Buzzer için pin - ESP32 DevKit */
+#define BUZZER_PIN 14
 
 class BuzzerManager {
 public:

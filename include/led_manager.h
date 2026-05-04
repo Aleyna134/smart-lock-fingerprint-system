@@ -3,9 +3,9 @@
 
 #include <Arduino.h>
 
-/** LED Pin Tanımlamaları */
-#define LED_GREEN_PIN 10
-#define LED_RED_PIN   3
+/** LED Pin Tanımlamaları - ESP32 DevKit */
+#define LED_GREEN_PIN 27
+#define LED_RED_PIN   25
 
 class LedManager {
 public:

@@ -32,7 +32,7 @@
 /** Kayıt edilebilecek maksimum parmak izi sayısı (sensöre bağlıdır) */
 #define FP_MAX_TEMPLATES 127
 
-/** ESP32 Serial2 varsayılan pinleri (değiştirilebilir) */
+/** ESP32 DevKit pinleri - Serial2 (UART2) kullanılır */
 #define FP_RX_PIN 16
 #define FP_TX_PIN 17
 

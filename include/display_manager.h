@@ -9,12 +9,12 @@
 #define LCD_ROWS    2
 #define LCD_ADDRESS 0x27 // Yaygın adres: 0x27 veya 0x3F
 
-// I2C Pinleri (Kullanici Tercihi)
+// I2C Pinleri - ESP32 DevKit varsayılan I2C pinleri
 #ifndef I2C_SDA
-#define I2C_SDA 5
+#define I2C_SDA 21
 #endif
 #ifndef I2C_SCL
-#define I2C_SCL 6
+#define I2C_SCL 22
 #endif
 
 class DisplayManager {
