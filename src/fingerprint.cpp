@@ -159,7 +159,7 @@ bool FingerprintManager::init(HardwareSerial* serial, int rxPin, int txPin) {
             // --- GÜVENLİK SEVİYESİ AYARI ---
             _initialized = true;
             _finger->getParameters();
-            _finger->setSecurityLevel(1);
+            // _finger->setSecurityLevel(1); // KLON SENSÖRLERDE ARAMAYI BOZABİLİR, KALDIRILDI!
             delay(100);
 
             // Buffer temizle
@@ -272,6 +272,11 @@ bool FingerprintManager::enrollFingerprint(int id) {
         return false;
     }
 
+    // --- TEYİT KONTROLÜ (Arkadaşınızın kodu) ---
+    delay(200);
+    _finger->getTemplateCount();
+    Serial.printf("[FP] TEKID KONTROLU - Toplam kayitli parmak sayisi: %d\n", _finger->templateCount);
+
     Serial.printf("[FP] BASARILI! Parmak izi ID %d olarak kaydedildi.\n", id);
     return true;
 #endif
@@ -337,7 +342,7 @@ FingerprintResult FingerprintManager::verifyFingerprint() {
     Serial.println("[FP] [1/3] Goruntu alindi OK");
 
     // Adım 2: Görüntüyü şablon dosyasına dönüştür (slot 1)
-    delay(100);
+    delay(50);
     p = _finger->image2Tz(1);
     Serial.printf("[FP] [2/3] image2Tz kodu: %d (%s)\n", p, p == FINGERPRINT_OK ? "OK" : errorToString(p).c_str());
     if (p != FINGERPRINT_OK) {
@@ -345,14 +350,26 @@ FingerprintResult FingerprintManager::verifyFingerprint() {
         return result;
     }
 
-    // Buffer'ı temizle (kalıntı veri)
-    while (_serial->available()) _serial->read();
-    delay(200);
+    // Adım 3: Veritabanında ara
+    _finger->getTemplateCount();
+    Serial.printf("[FP] Arama oncesi kayit sayisi: %d\n", _finger->templateCount);
 
-    // Adım 3: Veritabanında ara — fingerSearch() (0x04 komutu, R307 ile uyumlu)
-    // NOT: fingerFastSearch() (0x1B) bazı R307 klonlarında desteklenmez, "Arama hatasi" döner.
-    p = _finger->fingerSearch();
-    Serial.printf("[FP] [3/3] fingerSearch kodu: %d\n", p);
+    // Klon sensörlerde capacity değerini ezmek 23 (Invalid Parameter) hatası verebilir,
+    // o yüzden kendi bildirdiği değeri (örneğin 1000) kullanmasına izin veriyoruz.
+    // _finger->capacity = FP_MAX_TEMPLATES;
+
+    delay(50);
+    // Önce hızlı arama dene
+    p = _finger->fingerFastSearch();
+    Serial.printf("[FP] [3/3] fingerFastSearch kodu: %d\n", p);
+
+    // Eğer hızlı arama eşleşme bulamazsa veya hata verirse normal aramayı dene
+    if (p != FINGERPRINT_OK) {
+        Serial.println("[FP] fingerFastSearch sonuc bulamadi, fingerSearch deneniyor...");
+        delay(50);
+        p = _finger->fingerSearch();
+        Serial.printf("[FP] [3/3] fingerSearch kodu: %d (Arama Kapasitesi: %d)\n", p, _finger->capacity);
+    }
 
     if (p == FINGERPRINT_OK) {
         result.matched    = true;
