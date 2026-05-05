@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Outlet, NavLink } from 'react-router-dom'
 import { useSession } from '../context/SessionContext'
 import { api } from '../api'
-import { formatDateTime, formatStatus } from '../utils/format'
+import { formatDateTime } from '../utils/format'
 
 const navItems = [
   { to: '/dashboard', label: 'Dashboard', icon: '[]' },
@@ -12,29 +12,33 @@ const navItems = [
   { to: '/settings', label: 'Settings', icon: 'S' },
 ]
 
-const STORAGE_KEY = 'smartlock_last_seen'
-
 export default function Layout() {
   const { session } = useSession()
-  const [failedSince, setFailedSince] = useState([])
+  const [unreadAlerts, setUnreadAlerts] = useState([])
   const [dismissed, setDismissed] = useState(false)
 
   useEffect(() => {
-    const lastSeen = localStorage.getItem(STORAGE_KEY)
-    const lastSeenDate = lastSeen ? new Date(lastSeen) : new Date(0)
-
-    api.getLogs().then(logs => {
-      const newFailed = logs.filter(log =>
-        !log.success && new Date(log.time) > lastSeenDate
-      )
-      if (newFailed.length > 0) setFailedSince(newFailed)
-    }).catch(() => {})
-
-    // Store the current visit timestamp.
-    localStorage.setItem(STORAGE_KEY, new Date().toISOString())
+    api.getAlerts().then(alerts => {
+      const unread = alerts.filter(a => a.status === 'UNREAD')
+      console.log('[Layout] Alerts loaded. total=', alerts.length, 'unread=', unread.length)
+      if (unread.length > 0) setUnreadAlerts(unread)
+    }).catch((err) => {
+      console.error('[Layout] Failed to load alerts:', err.message)
+    })
   }, [])
 
-  const showBanner = failedSince.length > 0 && !dismissed
+  const showBanner = unreadAlerts.length > 0 && !dismissed
+
+  async function acknowledgeBanner() {
+    console.log('[Layout] Banner acknowledged. Marking all alerts read.')
+    setDismissed(true)
+    try {
+      const result = await api.markAllAlertsRead()
+      console.log('[Layout] Marked read:', result?.updated, 'alerts')
+    } catch (err) {
+      console.error('[Layout] Failed to mark alerts read:', err.message)
+    }
+  }
 
   return (
     <div className="flex h-screen bg-gray-950 text-gray-100">
@@ -110,27 +114,27 @@ export default function Layout() {
             {/* Content */}
             <div className="px-6 py-5">
               <p className="text-white text-sm font-semibold mb-1">
-                <span className="text-red-400">{failedSince.length} failed access attempt{failedSince.length === 1 ? '' : 's'}</span> detected while you were away.
+                <span className="text-red-400">{unreadAlerts.length} unread alert{unreadAlerts.length === 1 ? '' : 's'}</span> require your attention.
               </p>
               <p className="text-gray-400 text-xs mb-5">
-                Latest attempt: {formatDateTime(failedSince[0].time)}
+                Latest: {formatDateTime(unreadAlerts[0].created_at)}
               </p>
 
-              {/* Failed log list */}
+              {/* Alert list */}
               <div className="bg-gray-800 rounded-xl divide-y divide-gray-700 mb-5 max-h-48 overflow-y-auto">
-                {failedSince.map(log => (
-                  <div key={log.id} className="px-4 py-3 flex items-center justify-between">
+                {unreadAlerts.map(alert => (
+                  <div key={alert.id} className="px-4 py-3 flex items-center justify-between">
                     <div>
-                      <p className="text-sm text-red-300 font-medium">{formatStatus(log.status)}</p>
-                      <p className="text-xs text-gray-500 mt-0.5">
-                        {formatDateTime(log.time)}
-                      </p>
+                      <p className="text-sm text-red-300 font-medium">{alert.title}</p>
+                      <p className="text-xs text-gray-500 mt-0.5">{formatDateTime(alert.created_at)}</p>
                     </div>
-                    {log.fail_count > 0 && (
-                      <span className="text-xs bg-red-500/15 text-red-400 border border-red-500/20 px-2 py-0.5 rounded-md">
-                        {log.fail_count} attempt{log.fail_count === 1 ? '' : 's'}
-                      </span>
-                    )}
+                    <span className={`text-xs px-2 py-0.5 rounded-md border ${
+                      alert.severity === 'CRITICAL'
+                        ? 'bg-red-500/15 text-red-400 border-red-500/20'
+                        : 'bg-orange-500/15 text-orange-400 border-orange-500/20'
+                    }`}>
+                      {alert.severity === 'CRITICAL' ? 'Critical' : 'Warning'}
+                    </span>
                   </div>
                 ))}
               </div>
@@ -138,14 +142,14 @@ export default function Layout() {
               {/* Actions */}
               <div className="flex gap-3">
                 <NavLink
-                  to="/logs"
-                  onClick={() => setDismissed(true)}
+                  to="/alerts"
+                  onClick={acknowledgeBanner}
                   className="flex-1 bg-red-600 hover:bg-red-500 text-white text-sm font-semibold py-3 rounded-xl transition text-center"
                 >
-                  Review Logs
+                  Review Alerts
                 </NavLink>
                 <button
-                  onClick={() => setDismissed(true)}
+                  onClick={acknowledgeBanner}
                   className="flex-1 bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm py-3 rounded-xl transition"
                 >
                   Got it, Close

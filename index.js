@@ -18,6 +18,34 @@ const DELIVERY_STATUS = {
     CANCELLED: 'CANCELLED'
 };
 
+const ENROLLMENT_STATUS = {
+    PENDING: 'PENDING_ENROLLMENT',
+    ENROLLED: 'ENROLLED',
+    FAILED: 'ENROLL_FAILED',
+    PENDING_DELETE: 'PENDING_DELETE',
+    DELETE_FAILED: 'DELETE_FAILED'
+};
+
+const HARDWARE_COMMAND = {
+    ENROLL_FINGERPRINT: 'ENROLL_FINGERPRINT',
+    DELETE_FINGERPRINT: 'DELETE_FINGERPRINT'
+};
+
+const HARDWARE_COMMAND_STATUS = {
+    PENDING: 'PENDING',
+    CLAIMED: 'CLAIMED',
+    DONE: 'DONE',
+    FAILED: 'FAILED'
+};
+
+const LOCK_STATUS = {
+    LOCKED: 'Locked',
+    UNLOCKED: 'Unlocked'
+};
+
+const DEFAULT_LOCK_DEVICE_ID = process.env.LOCK_DEVICE_ID || 'lock-1';
+const HARDWARE_COMMAND_CLAIM_TIMEOUT_MS = numberFromEnv('HARDWARE_COMMAND_CLAIM_TIMEOUT_MS', 120000);
+
 const APNS_INVALID_REASONS = new Set([
     'BadDeviceToken',
     'DeviceTokenNotForTopic',
@@ -594,18 +622,39 @@ app.post('/api/users', async (req, res) => {
 
         const hashedPassword = await bcrypt.hash(password, 10);
 
-        const newUser = await prisma.user.create({
-            data: {
-                name: String(name),
-                email: String(email),
-                password: hashedPassword,
-                role: role ? String(role).toUpperCase() : 'USER'
-            }
+        const { newUser, command } = await prisma.$transaction(async (tx) => {
+            const createdUser = await tx.user.create({
+                data: {
+                    name: String(name),
+                    email: String(email),
+                    password: hashedPassword,
+                    role: role ? String(role).toUpperCase() : 'USER',
+                    enrollment_status: ENROLLMENT_STATUS.PENDING
+                }
+            });
+
+            const createdCommand = await tx.hardwareCommand.create({
+                data: {
+                    type: HARDWARE_COMMAND.ENROLL_FINGERPRINT,
+                    device_id: DEFAULT_LOCK_DEVICE_ID,
+                    user_id: createdUser.id
+                }
+            });
+
+            return { newUser: createdUser, command: createdCommand };
         });
 
         res.status(201).json({
-            message: 'User created successfully.',
-            user: { id: newUser.id, name: newUser.name, email: newUser.email, role: newUser.role }
+            message: 'User created. Waiting for fingerprint enrollment.',
+            enrollment_command_id: command.id,
+            user: {
+                id: newUser.id,
+                name: newUser.name,
+                email: newUser.email,
+                role: newUser.role,
+                enrolled_at: newUser.enrolled_at,
+                enrollment_status: newUser.enrollment_status
+            }
         });
     } catch (error) {
         console.error(error);
@@ -633,7 +682,7 @@ app.post('/api/login', async (req, res) => {
 app.get('/api/users', async (req, res) => {
     try {
         const users = await prisma.user.findMany({
-            select: { id: true, name: true, email: true, role: true, enrolled_at: true }
+            select: { id: true, name: true, email: true, role: true, enrolled_at: true, enrollment_status: true }
         });
         res.json(users);
     } catch (error) {
@@ -645,10 +694,360 @@ app.get('/api/users', async (req, res) => {
 app.delete('/api/users/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        await prisma.user.delete({ where: { id: Number(id) } });
-        res.json({ message: 'User deleted successfully.' });
+        const userId = Number(id);
+        if (Number.isNaN(userId)) {
+            return res.status(400).json({ error: 'Invalid user ID.' });
+        }
+
+        console.log(`[HW_COMMAND] Delete requested. user_id=${userId}`);
+
+        const user = await prisma.user.findUnique({ where: { id: userId } });
+        if (!user) {
+            console.warn(`[HW_COMMAND] Delete failed — user not found. user_id=${userId}`);
+            return res.status(404).json({ error: 'User not found.' });
+        }
+
+        const isRetry = user.enrollment_status === ENROLLMENT_STATUS.DELETE_FAILED;
+        if (isRetry) {
+            console.log(`[HW_COMMAND] Delete retry detected. user_id=${userId} previous_status=${user.enrollment_status}`);
+        }
+
+        const { command } = await prisma.$transaction(async (tx) => {
+            await tx.user.update({
+                where: { id: userId },
+                data: { enrollment_status: ENROLLMENT_STATUS.PENDING_DELETE }
+            });
+
+            const existingCommand = await tx.hardwareCommand.findFirst({
+                where: {
+                    user_id: userId,
+                    type: HARDWARE_COMMAND.DELETE_FINGERPRINT,
+                    status: { in: [HARDWARE_COMMAND_STATUS.PENDING, HARDWARE_COMMAND_STATUS.CLAIMED] }
+                },
+                orderBy: { created_at: 'asc' }
+            });
+
+            if (existingCommand) {
+                console.log(`[HW_COMMAND] Delete — reusing existing command. user_id=${userId} command_id=${existingCommand.id}`);
+                return { command: existingCommand };
+            }
+
+            const createdCommand = await tx.hardwareCommand.create({
+                data: {
+                    type: HARDWARE_COMMAND.DELETE_FINGERPRINT,
+                    device_id: DEFAULT_LOCK_DEVICE_ID,
+                    user_id: userId
+                }
+            });
+
+            return { command: createdCommand };
+        });
+
+        console.log(`[HW_COMMAND] Delete queued. user_id=${userId} command_id=${command.id}`);
+        res.json({
+            message: 'User deletion queued. Waiting for ESP32 fingerprint removal.',
+            deletion_command_id: command.id,
+            user: {
+                id: userId,
+                enrollment_status: ENROLLMENT_STATUS.PENDING_DELETE
+            }
+        });
     } catch (error) {
+        console.error('User delete queue error:', error);
         res.status(500).json({ error: 'User could not be deleted.' });
+    }
+});
+
+app.post('/api/users/:id/enrollment/retry', async (req, res) => {
+    try {
+        const userId = Number(req.params.id);
+        if (Number.isNaN(userId)) {
+            return res.status(400).json({ error: 'Invalid user ID.' });
+        }
+
+        console.log(`[HW_COMMAND] Enrollment retry requested. user_id=${userId}`);
+
+        const user = await prisma.user.findUnique({ where: { id: userId } });
+        if (!user) {
+            console.warn(`[HW_COMMAND] Enrollment retry failed — user not found. user_id=${userId}`);
+            return res.status(404).json({ error: 'User not found.' });
+        }
+        if (user.enrollment_status !== ENROLLMENT_STATUS.FAILED) {
+            console.warn(`[HW_COMMAND] Enrollment retry rejected — wrong status. user_id=${userId} status=${user.enrollment_status}`);
+            return res.status(409).json({
+                error: `Enrollment retry is only allowed when status is ENROLL_FAILED. Current status: ${user.enrollment_status}`
+            });
+        }
+
+        const { updatedUser, command } = await prisma.$transaction(async (tx) => {
+            const updated = await tx.user.update({
+                where: { id: userId },
+                data: { enrollment_status: ENROLLMENT_STATUS.PENDING }
+            });
+
+            const existingCommand = await tx.hardwareCommand.findFirst({
+                where: {
+                    user_id: userId,
+                    type: HARDWARE_COMMAND.ENROLL_FINGERPRINT,
+                    status: { in: [HARDWARE_COMMAND_STATUS.PENDING, HARDWARE_COMMAND_STATUS.CLAIMED] }
+                }
+            });
+
+            if (existingCommand) {
+                console.log(`[HW_COMMAND] Enrollment retry — reusing existing command. user_id=${userId} command_id=${existingCommand.id}`);
+                return { updatedUser: updated, command: existingCommand };
+            }
+
+            const createdCommand = await tx.hardwareCommand.create({
+                data: {
+                    type: HARDWARE_COMMAND.ENROLL_FINGERPRINT,
+                    device_id: DEFAULT_LOCK_DEVICE_ID,
+                    user_id: userId
+                }
+            });
+
+            return { updatedUser: updated, command: createdCommand };
+        });
+
+        console.log(`[HW_COMMAND] Enrollment retry queued. user_id=${userId} command_id=${command.id}`);
+        return res.json({
+            message: 'Enrollment retry queued. Waiting for fingerprint enrollment.',
+            enrollment_command_id: command.id,
+            user: {
+                id: updatedUser.id,
+                name: updatedUser.name,
+                email: updatedUser.email,
+                role: updatedUser.role,
+                enrollment_status: updatedUser.enrollment_status
+            }
+        });
+    } catch (error) {
+        console.error('Enrollment retry error:', error);
+        return res.status(500).json({ error: 'Enrollment retry could not be queued.' });
+    }
+});
+
+app.get('/api/hardware/commands/next', async (req, res) => {
+    try {
+        const deviceId = String(req.query.device_id || DEFAULT_LOCK_DEVICE_ID);
+        const staleClaimedBefore = new Date(Date.now() - HARDWARE_COMMAND_CLAIM_TIMEOUT_MS);
+
+        const command = await prisma.hardwareCommand.findFirst({
+            where: {
+                device_id: deviceId,
+                type: { in: [HARDWARE_COMMAND.ENROLL_FINGERPRINT, HARDWARE_COMMAND.DELETE_FINGERPRINT] },
+                OR: [
+                    { status: HARDWARE_COMMAND_STATUS.PENDING },
+                    { status: HARDWARE_COMMAND_STATUS.CLAIMED, claimed_at: { lt: staleClaimedBefore } }
+                ]
+            },
+            orderBy: { created_at: 'asc' }
+        });
+
+        if (!command) {
+            return res.json({ command: null });
+        }
+
+        if (!command.user_id) {
+            await prisma.hardwareCommand.update({
+                where: { id: command.id },
+                data: {
+                    status: HARDWARE_COMMAND_STATUS.FAILED,
+                    error: 'Command has no user ID.',
+                    completed_at: new Date()
+                }
+            });
+            console.warn(`[HW_COMMAND] Skipped command without user_id. command_id=${command.id}`);
+            return res.json({ command: null });
+        }
+
+        const claimed = await prisma.hardwareCommand.update({
+            where: { id: command.id },
+            data: {
+                status: HARDWARE_COMMAND_STATUS.CLAIMED,
+                attempts: { increment: 1 },
+                claimed_at: new Date(),
+                error: null
+            }
+        });
+
+        console.log(`[HW_COMMAND] Claimed. command_id=${claimed.id} type=${claimed.type} user_id=${claimed.user_id} attempts=${claimed.attempts}`);
+        return res.json({
+            command: {
+                id: claimed.id,
+                type: claimed.type,
+                user_id: claimed.user_id,
+                template_id: claimed.user_id,
+                device_id: claimed.device_id,
+                status: claimed.status,
+                attempts: claimed.attempts
+            }
+        });
+    } catch (error) {
+        console.error('Hardware command fetch error:', error);
+        return res.status(500).json({ error: 'Hardware command could not be loaded.' });
+    }
+});
+
+app.post('/api/hardware/commands/:id/result', async (req, res) => {
+    try {
+        const commandId = Number(req.params.id);
+        const { success, template_id, message } = req.body;
+
+        if (Number.isNaN(commandId)) {
+            return res.status(400).json({ error: 'Invalid command ID.' });
+        }
+
+        const command = await prisma.hardwareCommand.findUnique({ where: { id: commandId } });
+        if (!command) {
+            return res.status(404).json({ error: 'Hardware command not found.' });
+        }
+        if (!command.user_id) {
+            return res.status(409).json({ error: 'Hardware command is no longer attached to a user.' });
+        }
+
+        const templateId = template_id !== undefined && template_id !== null ? Number(template_id) : command.user_id;
+        const matchedTemplate = templateId === command.user_id;
+        const succeeded = Boolean(success) && matchedTemplate;
+        const errorMessage = succeeded
+            ? null
+            : (matchedTemplate ? String(message || 'Hardware command failed.') : 'Template ID does not match user ID.');
+
+        console.log(`[HW_COMMAND] Result received. command_id=${command.id} type=${command.type} success=${Boolean(success)} template_id=${templateId}`);
+
+        if (command.type === HARDWARE_COMMAND.DELETE_FINGERPRINT) {
+            if (succeeded) {
+                const [updatedCommand] = await prisma.$transaction([
+                    prisma.hardwareCommand.update({
+                        where: { id: command.id },
+                        data: {
+                            status: HARDWARE_COMMAND_STATUS.DONE,
+                            error: null,
+                            completed_at: new Date()
+                        }
+                    }),
+                    prisma.user.delete({ where: { id: command.user_id } })
+                ]);
+
+                console.log(`[HW_COMMAND] Fingerprint delete completed. command_id=${updatedCommand.id} user_id=${command.user_id}`);
+                return res.json({
+                    command: {
+                        id: updatedCommand.id,
+                        type: updatedCommand.type,
+                        status: updatedCommand.status,
+                        error: updatedCommand.error
+                    },
+                    user: {
+                        id: command.user_id,
+                        deleted: true
+                    }
+                });
+            }
+
+            const [updatedCommand, updatedUser] = await prisma.$transaction([
+                prisma.hardwareCommand.update({
+                    where: { id: command.id },
+                    data: {
+                        status: HARDWARE_COMMAND_STATUS.FAILED,
+                        error: errorMessage,
+                        completed_at: new Date()
+                    }
+                }),
+                prisma.user.update({
+                    where: { id: command.user_id },
+                    data: { enrollment_status: ENROLLMENT_STATUS.DELETE_FAILED }
+                })
+            ]);
+
+            console.warn(`[HW_COMMAND] Fingerprint delete failed. command_id=${updatedCommand.id} user_id=${updatedUser.id} error=${errorMessage}`);
+            return res.json({
+                command: {
+                    id: updatedCommand.id,
+                    type: updatedCommand.type,
+                    status: updatedCommand.status,
+                    error: updatedCommand.error
+                },
+                user: {
+                    id: updatedUser.id,
+                    enrollment_status: updatedUser.enrollment_status
+                }
+            });
+        }
+
+        if (command.type !== HARDWARE_COMMAND.ENROLL_FINGERPRINT) {
+            return res.status(400).json({ error: 'Unsupported hardware command type.' });
+        }
+
+        const [updatedCommand, updatedUser] = await prisma.$transaction([
+            prisma.hardwareCommand.update({
+                where: { id: command.id },
+                data: {
+                    status: succeeded ? HARDWARE_COMMAND_STATUS.DONE : HARDWARE_COMMAND_STATUS.FAILED,
+                    error: errorMessage,
+                    completed_at: new Date()
+                }
+            }),
+            prisma.user.update({
+                where: { id: command.user_id },
+                data: {
+                    enrollment_status: succeeded ? ENROLLMENT_STATUS.ENROLLED : ENROLLMENT_STATUS.FAILED
+                }
+            })
+        ]);
+
+        return res.json({
+            command: {
+                id: updatedCommand.id,
+                type: updatedCommand.type,
+                status: updatedCommand.status,
+                error: updatedCommand.error
+            },
+            user: {
+                id: updatedUser.id,
+                enrollment_status: updatedUser.enrollment_status
+            }
+        });
+    } catch (error) {
+        console.error('Hardware command result error:', error);
+        return res.status(500).json({ error: 'Hardware command result could not be saved.' });
+    }
+});
+
+app.post('/api/hardware/state', async (req, res) => {
+    try {
+        const lockStatus = String(req.body.lock_status || '').trim();
+        const event = req.body.event !== undefined && req.body.event !== null
+            ? String(req.body.event).trim()
+            : null;
+
+        if (![LOCK_STATUS.LOCKED, LOCK_STATUS.UNLOCKED].includes(lockStatus)) {
+            console.warn('[HW_STATE] Invalid lock state payload:', req.body);
+            return res.status(400).json({ error: 'lock_status must be Locked or Unlocked.' });
+        }
+
+        console.log(`[HW_STATE] Received lock state. status=${lockStatus} event=${event || 'none'}`);
+        const state = await prisma.systemState.upsert({
+            where: { id: 1 },
+            update: {
+                lock_status: lockStatus,
+                last_state_event: event || null
+            },
+            create: {
+                id: 1,
+                lock_status: lockStatus,
+                last_state_event: event || null
+            }
+        });
+
+        console.log(`[HW_STATE] Persisted lock state. status=${state.lock_status} event=${state.last_state_event || 'none'} updated_at=${state.updated_at.toISOString()}`);
+        return res.json({
+            lock_status: state.lock_status,
+            last_state_event: state.last_state_event,
+            updated_at: state.updated_at
+        });
+    } catch (error) {
+        console.error('Hardware state update error:', error);
+        return res.status(500).json({ error: 'Hardware state could not be saved.' });
     }
 });
 
@@ -678,8 +1077,11 @@ app.get('/api/alerts', async (req, res) => {
             take: limit
         });
 
+        const unreadCount = alerts.filter(a => a.status === 'UNREAD').length;
+        console.log(`[ALERT] GET /api/alerts — total=${alerts.length} unread=${unreadCount} limit=${limit}`);
         res.json(alerts.map(normalizeAlertForResponse));
     } catch (error) {
+        console.error('[ALERT] Failed to load alerts:', error);
         res.status(500).json({ error: 'Alerts could not be loaded.' });
     }
 });
@@ -691,8 +1093,10 @@ app.patch('/api/alerts/read-all', async (req, res) => {
             where: { status: 'UNREAD' },
             data: { status: 'READ' }
         });
+        console.log(`[ALERT] read-all — marked ${result.count} alerts as READ`);
         return res.json({ updated: result.count });
     } catch (error) {
+        console.error('[ALERT] Failed to mark all alerts read:', error);
         return res.status(500).json({ error: 'Alerts could not be updated.' });
     }
 });
@@ -710,8 +1114,10 @@ app.patch('/api/alerts/:id/read', async (req, res) => {
             data: { status: 'READ' }
         });
 
+        console.log(`[ALERT] alert_id=${alertId} marked READ`);
         return res.json(updated);
     } catch (error) {
+        console.error(`[ALERT] Failed to mark alert read. id=${req.params.id}:`, error);
         return res.status(500).json({ error: 'Alert could not be updated.' });
     }
 });
@@ -749,13 +1155,21 @@ app.get('/api/push-queue/status', async (_req, res) => {
 // 11. SİSTEM DURUMU
 app.get('/api/status', async (req, res) => {
     try {
-        const lastLog = await prisma.log.findFirst({ orderBy: { time: 'desc' } });
-        res.json({
-            lock_status: lastLog?.success ? 'Unlocked' : 'Locked',
+        const [lastLog, systemState] = await Promise.all([
+            prisma.log.findFirst({ orderBy: { time: 'desc' } }),
+            prisma.systemState.findUnique({ where: { id: 1 } })
+        ]);
+
+        const status = {
+            lock_status: systemState?.lock_status || LOCK_STATUS.LOCKED,
             last_event: normalizeAccessStatus(lastLog?.status) || 'No activity',
             fail_count: lastLog?.fail_count || 0
-        });
+        };
+
+        console.log(`[STATUS] lock_status=${status.lock_status} last_event=${status.last_event} fail_count=${status.fail_count}`);
+        res.json(status);
     } catch (error) {
+        console.error('System status load error:', error);
         res.status(500).json({ error: 'System status could not be loaded.' });
     }
 });

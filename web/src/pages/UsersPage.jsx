@@ -3,36 +3,83 @@ import { api } from '../api'
 import { useSession } from '../context/SessionContext'
 import { formatDate } from '../utils/format'
 
+const ACTIVE_HARDWARE_STATUSES = new Set(['PENDING_ENROLLMENT', 'PENDING_DELETE'])
+
 export default function UsersPage() {
   const { session } = useSession()
   const [users, setUsers] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [info, setInfo] = useState('')
   const [showAdd, setShowAdd] = useState(false)
   const [selectedUser, setSelectedUser] = useState(null)
   const [deleteConfirm, setDeleteConfirm] = useState(null)
 
-  async function load() {
-    setLoading(true)
+  async function load({ silent = false, previousUsers = users, reportTransitions = false } = {}) {
+    if (!silent) setLoading(true)
     setError('')
     try {
-      setUsers(await api.getUsers())
+      const nextUsers = await api.getUsers()
+      if (reportTransitions) {
+        const message = getHardwareTransitionMessage(previousUsers, nextUsers)
+        if (message?.type === 'error') {
+          setError(message.text)
+        } else if (message?.type === 'info') {
+          setInfo(message.text)
+        }
+      }
+      setUsers(nextUsers)
+      setSelectedUser(current => {
+        if (!current) return current
+        return nextUsers.find(user => user.id === current.id) || null
+      })
     } catch (err) {
       setError(err.message)
     } finally {
-      setLoading(false)
+      if (!silent) setLoading(false)
     }
   }
 
   useEffect(() => { load() }, [])
 
-  async function handleDelete(user) {
+  useEffect(() => {
+    const hasPendingHardwareWork = users.some(user => ACTIVE_HARDWARE_STATUSES.has(user.enrollment_status))
+    if (!hasPendingHardwareWork) return undefined
+
+    const previousUsers = users
+    const interval = setInterval(() => {
+      load({ silent: true, previousUsers, reportTransitions: true })
+    }, 3000)
+
+    return () => clearInterval(interval)
+  }, [users])
+
+  async function handleRetry(user) {
+    console.log('[Users] Enrollment retry requested. user_id=', user.id, 'name=', user.name)
     try {
-      await api.deleteUser(user.id)
+      const result = await api.retryEnrollment(user.id)
+      console.log('[Users] Enrollment retry queued. command_id=', result?.enrollment_command_id)
+      setInfo(`Enrollment retry queued for ${user.name}. Waiting for ESP32.`)
+      setSelectedUser(null)
+      load()
+    } catch (err) {
+      console.error('[Users] Enrollment retry failed.', err.message)
+      setError(err.message)
+    }
+  }
+
+  async function handleDelete(user) {
+    const isRetry = user.enrollment_status === 'DELETE_FAILED'
+    console.log(`[Users] Delete ${isRetry ? 'retry' : ''} requested. user_id=`, user.id, 'name=', user.name)
+    try {
+      const response = await api.deleteUser(user.id)
+      console.log('[Users] Delete queued. command_id=', response?.deletion_command_id)
+      setInfo(response?.message || `${user.name} deletion was queued. Waiting for ESP32 fingerprint removal.`)
       setDeleteConfirm(null)
       setSelectedUser(null)
       load()
     } catch (err) {
+      console.error('[Users] Delete failed.', err.message)
       setError(err.message)
     }
   }
@@ -59,6 +106,11 @@ export default function UsersPage() {
       {error && (
         <div className="bg-red-500/10 border border-red-500/30 rounded-lg px-4 py-3 text-sm text-red-400 mb-4">
           {error}
+        </div>
+      )}
+      {info && (
+        <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg px-4 py-3 text-sm text-blue-300 mb-4">
+          {info}
         </div>
       )}
 
@@ -113,10 +165,19 @@ export default function UsersPage() {
                     : 'bg-blue-500/15 text-blue-400 border border-blue-500/20'
                 }`}>{selectedUser.role}</span>
               } />
+              <Row label="Enrollment" value={<EnrollmentBadge status={selectedUser.enrollment_status} />} />
               <Row label="Registration Date" value={formatDate(selectedUser.enrolled_at, { day: 'numeric', month: 'long', year: 'numeric' })} />
             </div>
             {selectedUser.id !== session?.id && (
-              <div className="px-6 pb-5">
+              <div className="px-6 pb-5 space-y-2">
+                {selectedUser.enrollment_status === 'ENROLL_FAILED' && (
+                  <button
+                    onClick={() => handleRetry(selectedUser)}
+                    className="w-full border border-orange-500/30 hover:bg-orange-500/10 text-orange-400 py-2.5 rounded-xl text-sm transition"
+                  >
+                    Retry Enrollment
+                  </button>
+                )}
                 {deleteConfirm?.id === selectedUser.id ? (
                   <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-4">
                     <p className="text-sm text-red-300 mb-3">
@@ -137,6 +198,13 @@ export default function UsersPage() {
                       </button>
                     </div>
                   </div>
+                ) : selectedUser.enrollment_status === 'DELETE_FAILED' ? (
+                  <button
+                    onClick={() => setDeleteConfirm(selectedUser)}
+                    className="w-full border border-orange-500/30 hover:bg-orange-500/10 text-orange-400 py-2.5 rounded-xl text-sm transition"
+                  >
+                    Retry Delete
+                  </button>
                 ) : (
                   <button
                     onClick={() => setDeleteConfirm(selectedUser)}
@@ -156,7 +224,11 @@ export default function UsersPage() {
         <AddUserModal
           adminId={session?.id}
           onClose={() => setShowAdd(false)}
-          onSuccess={() => { setShowAdd(false); load() }}
+          onSuccess={(user) => {
+            setShowAdd(false)
+            setInfo(`${user.name} was created. Waiting for fingerprint enrollment on ESP32.`)
+            load()
+          }}
         />
       )}
     </div>
@@ -176,15 +248,16 @@ function Section({ title, count, users, loading, onSelect }) {
             <th className="text-left px-5 py-3 font-medium">Name</th>
             <th className="text-left px-5 py-3 font-medium">Email</th>
             <th className="text-left px-5 py-3 font-medium">Role</th>
+            <th className="text-left px-5 py-3 font-medium">Enrollment</th>
             <th className="text-left px-5 py-3 font-medium">Registration Date</th>
           </tr>
         </thead>
         <tbody>
           {loading && (
-            <tr><td colSpan={4} className="text-center text-gray-500 py-8">Loading...</td></tr>
+            <tr><td colSpan={5} className="text-center text-gray-500 py-8">Loading...</td></tr>
           )}
           {!loading && users.length === 0 && (
-            <tr><td colSpan={4} className="text-center text-gray-500 py-8">No users</td></tr>
+            <tr><td colSpan={5} className="text-center text-gray-500 py-8">No users</td></tr>
           )}
           {users.map(user => (
             <tr
@@ -209,6 +282,9 @@ function Section({ title, count, users, loading, onSelect }) {
                 }`}>
                   {user.role}
                 </span>
+              </td>
+              <td className="px-5 py-3.5">
+                <EnrollmentBadge status={user.enrollment_status} />
               </td>
               <td className="px-5 py-3.5 text-gray-500 text-xs">
                 {formatDate(user.enrolled_at)}
@@ -235,8 +311,8 @@ function AddUserModal({ adminId, onClose, onSuccess }) {
     setError('')
     setLoading(true)
     try {
-      await api.addUser(form.name, form.email, form.password, form.role, adminId)
-      onSuccess()
+      const response = await api.addUser(form.name, form.email, form.password, form.role, adminId)
+      onSuccess(response.user)
     } catch (err) {
       setError(err.message)
     } finally {
@@ -313,6 +389,56 @@ function AddUserModal({ adminId, onClose, onSuccess }) {
       </div>
     </div>
   )
+}
+
+function EnrollmentBadge({ status }) {
+  const normalized = status || 'ENROLLED'
+  const styles = {
+    PENDING_ENROLLMENT: 'bg-orange-500/15 text-orange-300 border-orange-500/25',
+    ENROLLED: 'bg-green-500/15 text-green-300 border-green-500/25',
+    ENROLL_FAILED: 'bg-red-500/15 text-red-300 border-red-500/25',
+    PENDING_DELETE: 'bg-yellow-500/15 text-yellow-300 border-yellow-500/25',
+    DELETE_FAILED: 'bg-red-500/15 text-red-300 border-red-500/25',
+  }
+  const labels = {
+    PENDING_ENROLLMENT: 'Pending',
+    ENROLLED: 'Enrolled',
+    ENROLL_FAILED: 'Failed',
+    PENDING_DELETE: 'Deleting',
+    DELETE_FAILED: 'Delete failed',
+  }
+
+  return (
+    <span className={`px-2 py-0.5 rounded-md text-xs font-medium border ${styles[normalized] || styles.ENROLLED}`}>
+      {labels[normalized] || 'Enrolled'}
+    </span>
+  )
+}
+
+function getHardwareTransitionMessage(previousUsers, nextUsers) {
+  const nextById = new Map(nextUsers.map(user => [user.id, user]))
+
+  for (const previous of previousUsers) {
+    const next = nextById.get(previous.id)
+
+    if (previous.enrollment_status === 'PENDING_ENROLLMENT' && next?.enrollment_status === 'ENROLLED') {
+      return { type: 'info', text: `Fingerprint enrollment completed for ${next.name}.` }
+    }
+
+    if (previous.enrollment_status === 'PENDING_ENROLLMENT' && next?.enrollment_status === 'ENROLL_FAILED') {
+      return { type: 'error', text: `Fingerprint enrollment failed for ${next.name}. Please try again.` }
+    }
+
+    if (previous.enrollment_status === 'PENDING_DELETE' && !next) {
+      return { type: 'info', text: `${previous.name} was deleted after fingerprint removal.` }
+    }
+
+    if (previous.enrollment_status === 'PENDING_DELETE' && next?.enrollment_status === 'DELETE_FAILED') {
+      return { type: 'error', text: `Fingerprint deletion failed for ${next.name}. User was not deleted.` }
+    }
+  }
+
+  return null
 }
 
 function Field({ label, children }) {

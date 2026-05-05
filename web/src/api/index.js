@@ -19,4 +19,8 @@ export const api = {
   addUser: (name, email, password, role, admin_id) =>
     request("POST", "/api/users", { name, email, password, role, admin_id }),
   deleteUser: (id) => request("DELETE", `/api/users/${id}`),
+  retryEnrollment: (id) => request("POST", `/api/users/${id}/enrollment/retry`),
+  getAlerts: () => request("GET", "/api/alerts"),
+  markAlertRead: (id) => request("PATCH", `/api/alerts/${id}/read`),
+  markAllAlertsRead: () => request("PATCH", "/api/alerts/read-all"),
 }

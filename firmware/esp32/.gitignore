@@ -1,0 +1,46 @@
+# ============================================================================
+# PlatformIO / C++ Projeleri İçin Standart .gitignore
+# ============================================================================
+
+# PlatformIO
+.pio/
+.platformio/
+lib/readme.txt
+include/network_config.local.h
+
+# VS code / IDE ayarlari
+.vscode/
+.idea/
+*.code-workspace
+CMakeLists.txt
+CMakeListsPrivate.txt
+
+# Çıktı / Derleme Dosyaları
+*.o
+*.out
+*.elf
+*.bin
+*.map
+*.hex
+*.a
+build/
+bin/
+
+# İşletim Sistemine Özgü Gizli Dosyalar (Windows / macOS / Linux)
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.swp
+*~
+
+# Hata Ayıklama (Debug) Dosyaları
+*.log
+*.log.*
+*.dmp
+*.pdb

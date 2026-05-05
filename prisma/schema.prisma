@@ -13,9 +13,11 @@ model User {
   email       String        @unique
   password    String
   role        String        @default("USER")
+  enrollment_status String  @default("ENROLLED")
   enrolled_at DateTime      @default(now())
   logs        Log[]
   deviceTokens DeviceToken[]
+  hardwareCommands HardwareCommand[]
 }
 
 model Log {
@@ -66,4 +68,28 @@ model PushDelivery {
   deviceToken     DeviceToken @relation(fields: [device_token_id], references: [id])
 
   @@unique([alert_id, device_token_id])
+}
+
+model HardwareCommand {
+  id           Int       @id @default(autoincrement())
+  type         String
+  status       String    @default("PENDING")
+  device_id    String    @default("lock-1")
+  user_id      Int?
+  user         User?     @relation(fields: [user_id], references: [id], onDelete: SetNull)
+  attempts     Int       @default(0)
+  error        String?
+  created_at   DateTime  @default(now())
+  claimed_at   DateTime?
+  completed_at DateTime?
+
+  @@index([device_id, status])
+  @@index([status, type, created_at])
+}
+
+model SystemState {
+  id               Int      @id
+  lock_status      String   @default("Locked")
+  last_state_event String?
+  updated_at       DateTime @updatedAt
 }

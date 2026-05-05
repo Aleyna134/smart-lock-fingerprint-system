@@ -1,36 +1,28 @@
 import { useState, useEffect, useMemo } from 'react'
 import { api } from '../api'
-import { formatDateTime, formatStatus, relativeTime } from '../utils/format'
+import { relativeTime, formatDateTime } from '../utils/format'
 
 const SEVERITY = {
-  high: { label: 'High', color: 'text-red-400 bg-red-500/10 border-red-500/20' },
-  medium: { label: 'Medium', color: 'text-orange-400 bg-orange-500/10 border-orange-500/20' },
-  low: { label: 'Low', color: 'text-yellow-400 bg-yellow-500/10 border-yellow-500/20' },
-}
-
-function getSeverity(log) {
-  if (log.fail_count >= 3) return 'high'
-  if (log.fail_count === 2) return 'medium'
-  return 'low'
+  CRITICAL: { label: 'Critical', color: 'text-red-400 bg-red-500/10 border-red-500/20' },
+  WARNING:  { label: 'Warning',  color: 'text-orange-400 bg-orange-500/10 border-orange-500/20' },
 }
 
 export default function AlertsPage() {
-  const [logs, setLogs] = useState([])
+  const [alerts, setAlerts] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [dismissed, setDismissed] = useState(() => {
-    const stored = localStorage.getItem('dismissed_alerts')
-    return stored ? JSON.parse(stored) : []
-  })
   const [filter, setFilter] = useState('all')
 
   async function load() {
     setLoading(true)
     setError('')
     try {
-      const data = await api.getLogs()
-      setLogs(data.filter(l => !l.success))
+      console.log('[Alerts] Loading from backend...')
+      const data = await api.getAlerts()
+      console.log('[Alerts] Loaded:', data.length, 'alerts')
+      setAlerts(data)
     } catch (err) {
+      console.error('[Alerts] Load failed:', err.message)
       setError(err.message)
     } finally {
       setLoading(false)
@@ -39,29 +31,34 @@ export default function AlertsPage() {
 
   useEffect(() => { load() }, [])
 
-  function dismiss(id) {
-    const next = [...dismissed, id]
-    setDismissed(next)
-    localStorage.setItem('dismissed_alerts', JSON.stringify(next))
+  async function markRead(alert) {
+    console.log('[Alerts] Marking read: id=', alert.id)
+    setAlerts(prev => prev.map(a => a.id === alert.id ? { ...a, status: 'READ' } : a))
+    try {
+      await api.markAlertRead(alert.id)
+    } catch (err) {
+      console.error('[Alerts] Mark read failed:', err.message)
+    }
   }
 
-  function dismissAll() {
-    const next = [...dismissed, ...active.map(l => l.id)]
-    setDismissed(next)
-    localStorage.setItem('dismissed_alerts', JSON.stringify(next))
+  async function markAllRead() {
+    console.log('[Alerts] Marking all read')
+    setAlerts(prev => prev.map(a => ({ ...a, status: 'READ' })))
+    try {
+      await api.markAllAlertsRead()
+    } catch (err) {
+      console.error('[Alerts] Mark all read failed:', err.message)
+    }
   }
 
-  const active = useMemo(() =>
-    logs.filter(l => !dismissed.includes(l.id)),
-    [logs, dismissed]
-  )
-
-  const filtered = useMemo(() => active.filter(l => {
-    if (filter === 'high') return getSeverity(l) === 'high'
-    if (filter === 'medium') return getSeverity(l) === 'medium'
-    if (filter === 'low') return getSeverity(l) === 'low'
+  const filtered = useMemo(() => alerts.filter(a => {
+    if (filter === 'critical') return a.severity === 'CRITICAL'
+    if (filter === 'warning')  return a.severity === 'WARNING'
+    if (filter === 'unread')   return a.status === 'UNREAD'
     return true
-  }), [active, filter])
+  }), [alerts, filter])
+
+  const unreadCount = alerts.filter(a => a.status === 'UNREAD').length
 
   return (
     <div className="p-8">
@@ -69,16 +66,16 @@ export default function AlertsPage() {
         <div>
           <h1 className="text-xl font-bold text-white">Alerts</h1>
           <p className="text-sm text-gray-500 mt-0.5">
-            {active.length > 0 ? `${active.length} active alert${active.length === 1 ? '' : 's'}` : 'No active alerts'}
+            {unreadCount > 0 ? `${unreadCount} unread alert${unreadCount === 1 ? '' : 's'}` : 'No unread alerts'}
           </p>
         </div>
         <div className="flex gap-3">
           <button onClick={load} className="bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 px-4 py-2 rounded-lg text-sm transition">
             Refresh
           </button>
-          {active.length > 0 && (
-            <button onClick={dismissAll} className="text-sm text-gray-400 hover:text-gray-200 border border-gray-700 px-4 py-2 rounded-lg transition">
-              Dismiss All
+          {unreadCount > 0 && (
+            <button onClick={markAllRead} className="text-sm text-gray-400 hover:text-gray-200 border border-gray-700 px-4 py-2 rounded-lg transition">
+              Mark All Read
             </button>
           )}
         </div>
@@ -86,7 +83,7 @@ export default function AlertsPage() {
 
       {/* Filters */}
       <div className="flex gap-2 mb-5">
-        {[['all', 'All'], ['high', 'High'], ['medium', 'Medium'], ['low', 'Low']].map(([val, label]) => (
+        {[['all', 'All'], ['critical', 'Critical'], ['warning', 'Warning'], ['unread', 'Unread']].map(([val, label]) => (
           <button
             key={val}
             onClick={() => setFilter(val)}
@@ -111,46 +108,50 @@ export default function AlertsPage() {
         <table className="w-full text-sm">
           <thead>
             <tr className="text-xs text-gray-500 uppercase tracking-wide border-b border-gray-800">
-              <th className="text-left px-5 py-3 font-medium">Status</th>
-              <th className="text-left px-5 py-3 font-medium">User</th>
+              <th className="text-left px-5 py-3 font-medium">Alert</th>
+              <th className="text-left px-5 py-3 font-medium">Detail</th>
               <th className="text-left px-5 py-3 font-medium">Severity</th>
-              <th className="text-left px-5 py-3 font-medium">Failed Attempts</th>
               <th className="text-left px-5 py-3 font-medium">Time</th>
               <th className="px-5 py-3" />
             </tr>
           </thead>
           <tbody>
             {loading && (
-              <tr><td colSpan={6} className="text-center text-gray-500 py-12">Loading...</td></tr>
+              <tr><td colSpan={5} className="text-center text-gray-500 py-12">Loading...</td></tr>
             )}
             {!loading && filtered.length === 0 && (
-              <tr><td colSpan={6} className="text-center text-gray-500 py-12">No alerts</td></tr>
+              <tr><td colSpan={5} className="text-center text-gray-500 py-12">No alerts</td></tr>
             )}
-            {filtered.map(log => {
-              const sev = getSeverity(log)
+            {filtered.map(alert => {
+              const sev = SEVERITY[alert.severity] || SEVERITY.WARNING
+              const isUnread = alert.status === 'UNREAD'
               return (
-                <tr key={log.id} className="border-b border-gray-800/60 hover:bg-gray-800/30 transition">
-                  <td className="px-5 py-3.5 text-gray-300 font-medium">{formatStatus(log.status)}</td>
-                  <td className="px-5 py-3.5 text-gray-400">{log.user?.name || 'Unknown'}</td>
+                <tr key={alert.id} className={`border-b border-gray-800/60 hover:bg-gray-800/30 transition ${isUnread ? 'bg-gray-800/20' : ''}`}>
                   <td className="px-5 py-3.5">
-                    <span className={`px-2 py-0.5 rounded-md text-xs font-medium border ${SEVERITY[sev].color}`}>
-                      {SEVERITY[sev].label}
+                    <div className="flex items-center gap-2">
+                      {isUnread && <span className="w-2 h-2 rounded-full bg-blue-400 flex-shrink-0" />}
+                      <span className="text-gray-200 font-medium">{alert.title}</span>
+                    </div>
+                  </td>
+                  <td className="px-5 py-3.5 text-gray-400 max-w-xs truncate">{alert.detail}</td>
+                  <td className="px-5 py-3.5">
+                    <span className={`px-2 py-0.5 rounded-md text-xs font-medium border ${sev.color}`}>
+                      {sev.label}
                     </span>
                   </td>
-                  <td className="px-5 py-3.5">
-                    <span className="text-orange-400 font-medium">{log.fail_count}</span>
-                  </td>
                   <td className="px-5 py-3.5 text-gray-500 text-xs">
-                    <div>{relativeTime(log.time)}</div>
-                    <div className="text-gray-600">{formatDateTime(log.time)}</div>
+                    <div>{relativeTime(alert.created_at)}</div>
+                    <div className="text-gray-600">{formatDateTime(alert.created_at)}</div>
                   </td>
                   <td className="px-5 py-3.5 text-right">
-                    <button
-                      onClick={() => dismiss(log.id)}
-                      className="text-xs text-gray-500 hover:text-red-400 transition"
-                    >
-                      Dismiss
-                    </button>
+                    {isUnread && (
+                      <button
+                        onClick={() => markRead(alert)}
+                        className="text-xs text-gray-500 hover:text-blue-400 transition"
+                      >
+                        Mark Read
+                      </button>
+                    )}
                   </td>
                 </tr>
               )
