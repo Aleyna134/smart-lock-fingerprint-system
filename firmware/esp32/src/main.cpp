@@ -4,6 +4,7 @@
 #include "buzzer.h"
 #include "display_manager.h"
 #include "led_manager.h"
+#include "keypad_manager.h"
 #include "iot_client.h"
 #include "network_config.h"
 
@@ -14,6 +15,7 @@ BuzzerManager buzzer;
 DisplayManager display;
 LedManager leds;
 IotClient iotClient;
+KeypadManager keypad;
 int failedAttempts = 0;
 bool enrollmentActive = false;
 bool waitingForFingerRelease = false;
@@ -31,6 +33,9 @@ void printRuntimeConfig();
 void pollHardwareCommands();
 void handleAutomaticFingerprintScan();
 void handleFingerprintAccess();
+void handlePinLogin(char startKey = '\0');
+void handleChangePin();
+void handleAdminMode();
 
 void setup() {
     Serial.begin(115200);
@@ -61,7 +66,10 @@ void setup() {
         }
     }
 
-    // 4. Parmak İzi Sensörü (Serial2: RX=16, TX=17)
+    // 4. Keypad Başlat
+    keypad.init();
+
+    // 5. Parmak İzi Sensörü (Serial2: RX=16, TX=17)
     if(fpManager.init(&Serial2, FP_RX_PIN, FP_TX_PIN)) {
         Serial.println("[OK] Parmak izi sensoru hazir.");
     } else {
@@ -73,16 +81,20 @@ void setup() {
     Serial.println(iotClient.isConnected() ? "[IOT] WiFi baglandi." : "[IOT] WiFi yok, offline devam.");
     printRuntimeConfig();
 
-    display.showMessage("Sistem Hazir", "Parmak Okutun");
+    display.showMessage("Sistem Hazir", "Parmak/PIN");
     Serial.println("\n[HAZIR] Komutlar:");
     Serial.println("  v = Parmak Dogrula   e = Yeni Kayit");
     Serial.println("  s = Durum Sorgula    c = Tum Kayitlari Sil");
     Serial.println("  o = Kapi Ac          k = Kapi Kilitle");
     Serial.println("  l = Donanim Testi    t = Otomatik Test");
+    Serial.println("\nKeypad Tuslari:");
+    Serial.println("  0-9 = PIN girisi     # = Onayla/Giris");
+    Serial.println("  A   = Admin Modu     B = Sifre Degistir");
+    Serial.println("  C   = Iptal          * = Durum");
 }
 
 void showReady() {
-    display.showMessage("Sistem Hazir", "Parmak Okutun");
+    display.showMessage("Sistem Hazir", "Parmak/PIN");
 }
 
 void printRuntimeConfig() {
@@ -165,6 +177,247 @@ void pollHardwareCommands() {
         }
     }
 }
+
+// ============================================================================
+// Keypad İşlem Fonksiyonları
+// ============================================================================
+
+void handlePinLogin(char startKey) {
+    if (keypad.isLockedOut()) {
+        unsigned long remaining = keypad.getLockoutRemaining();
+        display.showMessage("SISTEM KILITLI", String(remaining) + " sn bekle");
+        buzzer.beepError();
+        delay(2000);
+        showReady();
+        return;
+    }
+
+    display.showMessage("PIN Giriniz:", "");
+    Serial.println("\n[>] PIN giris modu aktif. # = Onayla, C = Iptal");
+
+    String enteredPin = "";
+    if (keypad.readPinInput(enteredPin, display, startKey)) {
+        if (keypad.verifyPin(enteredPin)) {
+            Serial.println("[KAPI] PIN ile ERISIM ONAYLANDI!");
+            display.showMessage("ERISIM ONAYLANDI", "Hosgeldiniz");
+            leds.success();
+            buzzer.beepSuccess();
+            iotClient.sendAccessLog(0, true, "PIN access granted", 0);
+            lockController.unlock();
+            iotClient.sendLockState("Unlocked", "PIN unlock");
+            delay(UNLOCK_DURATION_MS);
+            lockController.lock();
+            iotClient.sendLockState("Locked", "Auto relock");
+            leds.allOff();
+        } else {
+            Serial.println("[KAPI] ERISIM REDDEDILDI! (Yanlis PIN)");
+            iotClient.sendAccessLog(0, false, "Failed PIN", keypad.getWrongAttempts());
+
+            if (keypad.isLockedOut()) {
+                display.showMessage("SISTEM KILITLI!", String(LOCKOUT_DURATION / 1000) + " sn bekle");
+                buzzer.beepError();
+                delay(100);
+                buzzer.beepError();
+                iotClient.sendLockState("Locked", "PIN Lockout");
+            } else {
+                int remaining = MAX_WRONG_ATTEMPTS - keypad.getWrongAttempts();
+                display.showMessage("YANLIS PIN!", "Kalan: " + String(remaining));
+                leds.error();
+                buzzer.beepError();
+                delay(2000);
+                leds.allOff();
+            }
+        }
+    } else {
+        display.showMessage("Iptal/Timeout", "");
+        delay(1000);
+    }
+
+    showReady();
+}
+
+void handleChangePin() {
+    Serial.println("\n[>] PIN degistirme modu aktif.");
+
+    display.showMessage("Eski PIN:", "");
+    String oldPin = "";
+    if (!keypad.readPinInput(oldPin, display)) {
+        display.showMessage("Iptal Edildi", "");
+        delay(1000);
+        showReady();
+        return;
+    }
+
+    if (!keypad.verifyPin(oldPin)) {
+        display.showMessage("ESKI PIN YANLIS", "Reddedildi!");
+        leds.error();
+        buzzer.beepError();
+        delay(2000);
+        leds.allOff();
+        showReady();
+        return;
+    }
+
+    display.showMessage("Yeni PIN:", "");
+    String newPin = "";
+    if (!keypad.readPinInput(newPin, display)) {
+        display.showMessage("Iptal Edildi", "");
+        delay(1000);
+        showReady();
+        return;
+    }
+
+    display.showMessage("Tekrar Girin:", "");
+    String confirmPin = "";
+    if (!keypad.readPinInput(confirmPin, display)) {
+        display.showMessage("Iptal Edildi", "");
+        delay(1000);
+        showReady();
+        return;
+    }
+
+    if (newPin != confirmPin) {
+        display.showMessage("PIN UYUMSUZ!", "Tekrar Deneyin");
+        leds.error();
+        buzzer.beepError();
+        delay(2000);
+        leds.allOff();
+        showReady();
+        return;
+    }
+
+    if (keypad.setNewPin(newPin)) {
+        display.showMessage("PIN DEGISTIRILDI", "Basarili!");
+        leds.success();
+        buzzer.beepSuccess();
+    } else {
+        display.showMessage("PIN HATASI", "4-8 hane olmali");
+        leds.error();
+        buzzer.beepError();
+    }
+    delay(2000);
+    leds.allOff();
+    showReady();
+}
+
+void handleAdminMode() {
+    Serial.println("\n[>] Admin modu aktif.");
+
+    if (keypad.isDefaultPin()) {
+        display.showMessage("ILK KURULUM", "PIN Belirleyin");
+        Serial.println("[ADMIN] Ilk kurulum - PIN dogrulamasi atlaniyor.");
+        delay(1500);
+    } else {
+        display.showMessage("ADMIN MODU", "");
+        String adminPin = "";
+        if (!keypad.readPinInput(adminPin, display)) {
+            display.showMessage("Iptal Edildi", "");
+            delay(1000);
+            showReady();
+            return;
+        }
+        if (!keypad.verifyPin(adminPin)) {
+            display.showMessage("YETKISIZ ERISIM", "Reddedildi!");
+            leds.error();
+            buzzer.beepError();
+            delay(2000);
+            leds.allOff();
+            showReady();
+            return;
+        }
+    }
+
+    display.showMessage("1:PIN 3:Parmak+", "2:Rst 4:TumuSil");
+    Serial.println("[ADMIN] 1=Yeni PIN, 2=Fabrika Sifirla, 3=Parmak Ekle, 4=Tumunu Sil, 5=Durum, C=Cikis");
+
+    unsigned long menuStart = millis();
+    while (millis() - menuStart < INPUT_TIMEOUT_MS) {
+        char mKey = keypad.getKey();
+        if (mKey == '\0') continue;
+
+        if (mKey == '1') {
+            display.showMessage("Yeni PIN Girin:", "");
+            String newPin = "";
+            if (keypad.readPinInput(newPin, display)) {
+                if (keypad.setNewPin(newPin)) {
+                    display.showMessage("PIN KAYDEDILDI", "Basarili!");
+                    leds.success();
+                    buzzer.beepSuccess();
+                    delay(2000);
+                    leds.allOff();
+                }
+            }
+            break;
+        }
+        else if (mKey == '2') {
+            keypad.resetToDefault();
+            display.showMessage("PIN SIFIRLANDI", "Yeni PIN: 1234");
+            buzzer.beepWelcome();
+            delay(3000);
+            break;
+        }
+        else if (mKey == '3') {
+            if (!fpManager.isReady()) {
+                display.showMessage("SENSOR HATASI", "BAGLANTI YOK");
+                delay(2000);
+            } else {
+                int count = fpManager.getStoredCount();
+                if (count < 0) {
+                    display.showMessage("SENSOR HATASI", "");
+                    delay(2000);
+                } else if (count >= FP_MAX_TEMPLATES) {
+                    display.showMessage("KAPASITE DOLU", "Silmek icin 4");
+                    buzzer.beepError();
+                    delay(2000);
+                } else {
+                    int nextId = count + 1;
+                    display.showMessage("YENI KAYIT", "Parmak Koyun");
+                    if (fpManager.enrollFingerprint(nextId)) {
+                        display.showMessage("KAYIT BASARILI", "ID: " + String(nextId));
+                        leds.success(); buzzer.beepSuccess();
+                    } else {
+                        display.showMessage("KAYIT HATASI", "Tekrar Deneyin");
+                        leds.error(); buzzer.beepError();
+                    }
+                    delay(2000); leds.allOff();
+                }
+            }
+            break;
+        }
+        else if (mKey == '4') {
+            display.showMessage("SILIYOR...", "Lutfen Bekleyin");
+            if (fpManager.deleteAll()) {
+                display.showMessage("TUMU SILINDI", "Sistem Sifirlandi");
+                leds.success(); buzzer.beepWelcome(); delay(1000); leds.allOff();
+            } else {
+                display.showMessage("SILME HATASI", "");
+                leds.error(); buzzer.beepError(); delay(1000); leds.allOff();
+            }
+            break;
+        }
+        else if (mKey == '5') {
+            if (!fpManager.isReady()) {
+                display.showMessage("SENSOR: YOK", "BAGLAYIN");
+            } else {
+                SensorInfo info = fpManager.getSensorData();
+                display.showMessage("Kayitli:" + String(info.template_count), "Kapasite:" + String(info.capacity));
+            }
+            delay(3000);
+            break;
+        }
+        else if (mKey == 'C' || mKey == 'c') {
+            Serial.println("[ADMIN] Cikis yapildi.");
+            break;
+        }
+        menuStart = millis();
+    }
+
+    showReady();
+}
+
+// ============================================================================
+// Parmak İzi Erişim
+// ============================================================================
 
 void handleFingerprintAccess() {
     unsigned long now = millis();
@@ -298,8 +551,45 @@ void handleAutomaticFingerprintScan() {
 
 void loop() {
     pollHardwareCommands();
+
+    // 1. KEYPAD KONTROLÜ (Öncelikli)
+    char key = keypad.getKey();
+    if (key != '\0') {
+        Serial.printf("[KEYPAD] Tus: '%c'\n", key);
+        switch (key) {
+            case '0': case '1': case '2': case '3': case '4':
+            case '5': case '6': case '7': case '8': case '9':
+            case '#':
+                handlePinLogin(key);
+                break;
+            case 'A':
+                handleAdminMode();
+                break;
+            case 'B':
+                handleChangePin();
+                break;
+            case 'D':
+                Serial.println("\n[>] Kapi acmak icin PIN girin.");
+                handlePinLogin();
+                break;
+            case 'C':
+                display.showMessage("Sistem Hazir", "Parmak/PIN");
+                Serial.println("[KEYPAD] Ana ekrana donuldu.");
+                break;
+            case '*':
+                if (keypad.isLockedOut()) {
+                    display.showMessage("SISTEM KILITLI", String(keypad.getLockoutRemaining()) + " sn");
+                } else {
+                    display.showMessage("Sistem Hazir", "Parmak/PIN");
+                }
+                break;
+        }
+    }
+
+    // 2. Otomatik Parmak İzi Tarama
     handleAutomaticFingerprintScan();
-    // 1. Manuel Komut Kontrolü (Serial)
+
+    // 3. Manuel Komut Kontrolü (Serial)
     if (Serial.available()) {
         char cmd = Serial.read();
 
@@ -333,7 +623,7 @@ void loop() {
                     display.showMessage("KAPASITE DOLU", "Sil: 'c' komutu");
                     buzzer.beepError();
                     delay(2000);
-                    display.showMessage("Sistem Hazir", "Parmak Okutun");
+                    display.showMessage("Sistem Hazir", "Parmak/PIN");
                     break;
                 }
                 int nextId = count + 1;
@@ -350,7 +640,7 @@ void loop() {
                 delay(2000); leds.allOff();
                 waitingForFingerRelease = true;
                 nextVerifyAllowedAt = millis() + VERIFY_COOLDOWN_MS;
-                display.showMessage("Sistem Hazir", "Parmak Okutun");
+                display.showMessage("Sistem Hazir", "Parmak/PIN");
                 break;
             }
             case 's': case 'S': {
@@ -424,10 +714,18 @@ void loop() {
                 display.showMessage("OTO TEST:", autoTestActive ? "ACIK" : "KAPALI");
                 break;
             }
+            case 'p': case 'P': {
+                Serial.println("\n[>] PIN fabrika ayarlarina sifirlaniyor...");
+                keypad.resetToDefault();
+                display.showMessage("PIN SIFIRLANDI", "Varsayilan: 1234");
+                buzzer.beepWelcome();
+                delay(2000);
+                display.showMessage("Sistem Hazir", "Parmak/PIN");
+                break;
+            }
             default: {
-                // Tanınmayan komutlar için yardım göster
                 Serial.printf("[?] Bilinmeyen komut: '%c'\n", cmd);
-                Serial.println("[?] Gecerli komutlar: v e s c o k l t");
+                Serial.println("[?] Gecerli komutlar: v e s c o k l t p");
                 break;
             }
         }

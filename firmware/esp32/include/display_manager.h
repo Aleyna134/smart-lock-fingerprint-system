@@ -52,6 +52,12 @@ public:
         }
     }
 
+    /** Sadece 2. satırı günceller (1. satır değişmez) */
+    void showLine2(const String& line2) {
+        _lcd.setCursor(0, 1);
+        _lcd.print(line2.substring(0, 16));
+    }
+
     void showStatus(bool locked) {
         _lcd.clear();
         _lcd.setCursor(0, 0);

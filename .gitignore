@@ -5,3 +5,10 @@ node_modules
 .claude/
 /generated/prisma
 web/node_modules
+
+# Firmware (PlatformIO)
+firmware/esp32/.pio/
+firmware/esp32/.vscode/
+firmware/esp32/include/network_config.local.h
+.pio/
+
