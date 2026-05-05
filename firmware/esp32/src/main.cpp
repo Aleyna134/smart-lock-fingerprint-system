@@ -1,4 +1,7 @@
 #include <Arduino.h>
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
+
 #include "fingerprint.h"
 #include "lock.h"
 #include "buzzer.h"
@@ -38,6 +41,9 @@ void handleChangePin();
 void handleAdminMode();
 
 void setup() {
+    // Voltaj düşmesi (Brownout) korumasını kapat (WiFi anlık akım çektiğinde reset atmaması için)
+    WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
+
     Serial.begin(115200);
     while (!Serial && millis() < 3000) delay(10);
     

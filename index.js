@@ -1181,7 +1181,7 @@ app.get('*splat', (req, res) => {
     res.sendFile(path.join(webDist, 'index.html'));
 });
 
-function startServer(port = Number(process.env.PORT || 3000)) {
+function startServer(port = Number(process.env.PORT || 3005)) {
     startPushQueueWorker();
 
     const server = app.listen(port, () => {
