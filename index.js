@@ -1,9 +1,11 @@
+require('dotenv').config();
 const express = require('express');
 const { PrismaClient } = require('@prisma/client');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const fs = require('fs');
 const http2 = require('http2');
+const nodemailer = require('nodemailer');
 const path = require('path');
 
 const app = express();
@@ -68,9 +70,13 @@ const PUSH_RETRY_BASE_MS = numberFromEnv('PUSH_RETRY_BASE_MS', 15000);
 const PUSH_RETRY_MAX_MS = numberFromEnv('PUSH_RETRY_MAX_MS', 15 * 60 * 1000);
 const APNS_EXPIRATION_SECONDS = numberFromEnv('APNS_EXPIRATION_SECONDS', 7 * 24 * 60 * 60);
 const ALERT_PUSH_COOLDOWN_SECONDS = numberFromEnv('ALERT_PUSH_COOLDOWN_SECONDS', 30);
+const ALERT_EMAIL_COOLDOWN_SECONDS = numberFromEnv('ALERT_EMAIL_COOLDOWN_SECONDS', 60);
+
+const EMAIL_ALERT_TYPES = new Set(['MULTIPLE_FAILED_ATTEMPTS']);
 
 let queueWorkerHandle = null;
 let queueProcessing = false;
+let mailTransporter = null;
 
 function toBase64URL(value) {
     const input = Buffer.isBuffer(value) ? value : Buffer.from(String(value), 'utf8');
@@ -359,6 +365,95 @@ async function isPushSuppressedByCooldown(alert) {
     return Boolean(similarRecentAlert);
 }
 
+function hasMailConfig() {
+    return Boolean(process.env.SMTP_USER && process.env.SMTP_PASS);
+}
+
+function getMailTransporter() {
+    if (mailTransporter) return mailTransporter;
+
+    const port = numberFromEnv('SMTP_PORT', 465);
+    mailTransporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST || 'smtp.gmail.com',
+        port,
+        secure: process.env.SMTP_SECURE ? process.env.SMTP_SECURE === 'true' : port === 465,
+        auth: {
+            user: process.env.SMTP_USER,
+            pass: process.env.SMTP_PASS
+        }
+    });
+
+    return mailTransporter;
+}
+
+async function isEmailSuppressedByCooldown(alert) {
+    const threshold = new Date(Date.now() - ALERT_EMAIL_COOLDOWN_SECONDS * 1000);
+
+    const similarRecentAlert = await prisma.alert.findFirst({
+        where: {
+            id: { not: alert.id },
+            type: alert.type,
+            created_at: { gte: threshold }
+        },
+        orderBy: { created_at: 'desc' },
+        select: { id: true }
+    });
+
+    return Boolean(similarRecentAlert);
+}
+
+function buildAlertEmailBody(alert, log) {
+    return [
+        'Smart Lock critical security alert',
+        '',
+        `Alert: ${alert.title}`,
+        `Severity: ${alert.severity}`,
+        `Detail: ${alert.detail}`,
+        `Failed attempts: ${log.fail_count}`,
+        `Lock status: ${LOCK_STATUS.LOCKED}`,
+        `Time: ${new Date(log.time).toISOString()}`,
+        '',
+        'Open the Smart Lock app or web panel for details.'
+    ].join('\n');
+}
+
+async function sendCriticalAlertEmail(alert, log) {
+    if (!EMAIL_ALERT_TYPES.has(alert.type)) return 0;
+    if (!hasMailConfig()) {
+        console.warn('[MAIL] SMTP config missing. Critical alert email skipped.');
+        return 0;
+    }
+
+    if (await isEmailSuppressedByCooldown(alert)) {
+        console.log(`[MAIL] Email cooldown nedeniyle bastırıldı alert_id=${alert.id}`);
+        return 0;
+    }
+
+    const admins = await prisma.user.findMany({
+        where: { role: 'ADMIN' },
+        select: { email: true }
+    });
+    const recipients = admins
+        .map((admin) => String(admin.email || '').trim())
+        .filter((email) => email.includes('@'));
+
+    if (recipients.length === 0) {
+        console.warn('[MAIL] Admin email bulunamadı. Critical alert email skipped.');
+        return 0;
+    }
+
+    const from = process.env.MAIL_FROM || process.env.SMTP_USER;
+    await getMailTransporter().sendMail({
+        from,
+        to: recipients,
+        subject: `[Smart Lock] ${alert.title}`,
+        text: buildAlertEmailBody(alert, log)
+    });
+
+    console.log(`[MAIL] Critical alert email sent. alert_id=${alert.id} recipients=${recipients.length}`);
+    return recipients.length;
+}
+
 async function markDeliveryFailed(delivery, reason, retryable) {
     const nextAttempts = delivery.attempts + 1;
     const exhausted = nextAttempts >= PUSH_MAX_ATTEMPTS || !retryable;
@@ -526,6 +621,12 @@ app.post('/api/access-log', async (req, res) => {
             } else {
                 console.log(`🔕 Push cooldown nedeniyle bastırıldı alert_id=${alert.id}`);
             }
+
+            if (EMAIL_ALERT_TYPES.has(alert.type)) {
+                void sendCriticalAlertEmail(alert, newLog).catch((error) => {
+                    console.error(`[MAIL] Critical alert email failed. alert_id=${alert.id}:`, error);
+                });
+            }
         }
 
         console.log('Yeni log kaydedildi:', newLog);
@@ -603,6 +704,167 @@ app.post('/api/device-token', async (req, res) => {
     } catch (error) {
         console.error('Device token kaydetme hatasi:', error);
         return res.status(500).json({ error: 'Device token could not be registered.' });
+    }
+});
+
+// İLK KURULUM — Sadece hiç kullanıcı yokken çalışır, ilk admin'i oluşturur
+app.post('/api/setup', async (req, res) => {
+    try {
+        const count = await prisma.user.count();
+        if (count > 0) {
+            return res.status(403).json({ error: 'Setup already completed. Use admin account to add users.' });
+        }
+
+        const { name, email, password } = req.body;
+        if (!name || !email || !password) {
+            return res.status(400).json({ error: 'name, email and password are required.' });
+        }
+
+        const hashedPassword = await bcrypt.hash(String(password), 10);
+
+        const { admin, command } = await prisma.$transaction(async (tx) => {
+            const createdAdmin = await tx.user.create({
+                data: {
+                    name: String(name),
+                    email: String(email),
+                    password: hashedPassword,
+                    role: 'ADMIN',
+                    enrollment_status: ENROLLMENT_STATUS.PENDING
+                }
+            });
+
+            const createdCommand = await tx.hardwareCommand.create({
+                data: {
+                    type: HARDWARE_COMMAND.ENROLL_FINGERPRINT,
+                    device_id: DEFAULT_LOCK_DEVICE_ID,
+                    user_id: createdAdmin.id
+                }
+            });
+
+            return { admin: createdAdmin, command: createdCommand };
+        });
+
+        console.log(`[SETUP] İlk admin oluşturuldu. user_id=${admin.id} enrollment_command_id=${command.id}`);
+        return res.status(201).json({
+            message: 'Admin account created. Waiting for fingerprint enrollment.',
+            enrollment_command_id: command.id,
+            user: { id: admin.id, name: admin.name, email: admin.email, role: admin.role }
+        });
+    } catch (error) {
+        console.error('[SETUP] Hata:', error);
+        return res.status(500).json({ error: 'Setup failed.' });
+    }
+});
+
+// KEYPAD ENROLLMENT — ESP32 fiziksel kayıt tetikler, boş kullanıcı oluşturur
+app.post('/api/keypad-enroll', async (req, res) => {
+    try {
+        const user = await prisma.user.create({
+            data: {
+                name: '',
+                email: `keypad_${Date.now()}@local`,
+                password: '',
+                role: 'USER',
+                enrollment_status: ENROLLMENT_STATUS.ENROLLED,
+                enrolled_at: new Date()
+            }
+        });
+        console.log(`[KEYPAD] Boş kullanıcı oluşturuldu. user_id=${user.id}`);
+        return res.status(201).json({ user_id: user.id });
+    } catch (error) {
+        console.error('[KEYPAD] Kullanıcı oluşturulamadı:', error);
+        return res.status(500).json({ error: 'User could not be created.' });
+    }
+});
+
+// KEYPAD DELETE — ESP32 sensörden silince backend kullanıcısını da sil
+app.delete('/api/keypad-delete/:templateId', async (req, res) => {
+    try {
+        const templateId = Number(req.params.templateId);
+        if (Number.isNaN(templateId)) {
+            return res.status(400).json({ error: 'Invalid template ID.' });
+        }
+
+        const user = await prisma.user.findUnique({ where: { id: templateId } });
+        if (!user) {
+            return res.status(404).json({ error: 'User not found.' });
+        }
+        if (user.role === 'ADMIN') {
+            return res.status(403).json({ error: 'Admin users cannot be deleted via keypad.' });
+        }
+
+        await prisma.user.delete({ where: { id: templateId } });
+        console.log(`[KEYPAD] Kullanıcı silindi. user_id=${templateId}`);
+        return res.json({ deleted: true, user_id: templateId });
+    } catch (error) {
+        console.error('[KEYPAD] Kullanıcı silinemedi:', error);
+        return res.status(500).json({ error: 'User could not be deleted.' });
+    }
+});
+
+// KEYPAD DELETE ALL — Tüm non-admin kullanıcıları sil
+app.delete('/api/keypad-delete-all', async (req, res) => {
+    try {
+        const result = await prisma.user.deleteMany({ where: { role: 'USER' } });
+        console.log(`[KEYPAD] Tüm kullanıcılar silindi. count=${result.count}`);
+        return res.json({ deleted: result.count });
+    } catch (error) {
+        console.error('[KEYPAD] Toplu silme hatası:', error);
+        return res.status(500).json({ error: 'Users could not be deleted.' });
+    }
+});
+
+// KULLANICI ADI — ESP32'nin parmak izi eşleşmesinde adı çekmesi için
+app.get('/api/users/:id/name', async (req, res) => {
+    try {
+        const userId = Number(req.params.id);
+        if (Number.isNaN(userId)) return res.status(400).json({ name: '' });
+        const user = await prisma.user.findUnique({ where: { id: userId }, select: { name: true } });
+        return res.json({ name: user?.name || '' });
+    } catch {
+        return res.json({ name: '' });
+    }
+});
+
+// KULLANICI GÜNCELLEME — Keypad ile eklenen boş kullanıcıya isim/email atar
+app.patch('/api/users/:id', async (req, res) => {
+    try {
+        const userId = Number(req.params.id);
+        if (Number.isNaN(userId)) {
+            return res.status(400).json({ error: 'Invalid user ID.' });
+        }
+
+        const { name, email, password } = req.body;
+        if (!name || !email) {
+            return res.status(400).json({ error: 'name and email are required.' });
+        }
+
+        const user = await prisma.user.findUnique({ where: { id: userId } });
+        if (!user) {
+            return res.status(404).json({ error: 'User not found.' });
+        }
+
+        const updateData = { name: String(name), email: String(email) };
+        if (password && String(password).length >= 8) {
+            updateData.password = await bcrypt.hash(String(password), 10);
+        }
+
+        const updated = await prisma.user.update({
+            where: { id: userId },
+            data: updateData
+        });
+
+        console.log(`[USER] Güncellendi. user_id=${updated.id} name=${updated.name}`);
+        return res.json({
+            id: updated.id,
+            name: updated.name,
+            email: updated.email,
+            role: updated.role,
+            enrollment_status: updated.enrollment_status
+        });
+    } catch (error) {
+        console.error('[USER] Güncelleme hatası:', error);
+        return res.status(500).json({ error: 'User could not be updated.' });
     }
 });
 
@@ -861,15 +1123,21 @@ app.get('/api/hardware/commands/next', async (req, res) => {
             return res.json({ command: null });
         }
 
-        const claimed = await prisma.hardwareCommand.update({
-            where: { id: command.id },
-            data: {
-                status: HARDWARE_COMMAND_STATUS.CLAIMED,
-                attempts: { increment: 1 },
-                claimed_at: new Date(),
-                error: null
-            }
-        });
+        const [claimed, commandUser] = await Promise.all([
+            prisma.hardwareCommand.update({
+                where: { id: command.id },
+                data: {
+                    status: HARDWARE_COMMAND_STATUS.CLAIMED,
+                    attempts: { increment: 1 },
+                    claimed_at: new Date(),
+                    error: null
+                }
+            }),
+            prisma.user.findUnique({
+                where: { id: command.user_id },
+                select: { name: true }
+            })
+        ]);
 
         console.log(`[HW_COMMAND] Claimed. command_id=${claimed.id} type=${claimed.type} user_id=${claimed.user_id} attempts=${claimed.attempts}`);
         return res.json({
@@ -878,6 +1146,7 @@ app.get('/api/hardware/commands/next', async (req, res) => {
                 type: claimed.type,
                 user_id: claimed.user_id,
                 template_id: claimed.user_id,
+                user_name: commandUser?.name || '',
                 device_id: claimed.device_id,
                 status: claimed.status,
                 attempts: claimed.attempts
@@ -1145,7 +1414,8 @@ app.get('/api/push-queue/status', async (_req, res) => {
             failed,
             cancelled,
             due_now: dueNow,
-            apns_configured: hasApnsConfig()
+            apns_configured: hasApnsConfig(),
+            mail_configured: hasMailConfig()
         });
     } catch (error) {
         return res.status(500).json({ error: 'Queue status could not be loaded.' });

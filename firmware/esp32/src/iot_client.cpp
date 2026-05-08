@@ -2,7 +2,43 @@
 #include "network_config.h"
 
 #include <HTTPClient.h>
+#include <Preferences.h>
 #include <WiFi.h>
+
+static Preferences logPrefs;
+
+namespace {
+const char* wifiStatusName(wl_status_t status) {
+    switch (status) {
+        case WL_IDLE_STATUS: return "WL_IDLE_STATUS";
+        case WL_NO_SSID_AVAIL: return "WL_NO_SSID_AVAIL";
+        case WL_SCAN_COMPLETED: return "WL_SCAN_COMPLETED";
+        case WL_CONNECTED: return "WL_CONNECTED";
+        case WL_CONNECT_FAILED: return "WL_CONNECT_FAILED";
+        case WL_CONNECTION_LOST: return "WL_CONNECTION_LOST";
+        case WL_DISCONNECTED: return "WL_DISCONNECTED";
+        default: return "UNKNOWN";
+    }
+}
+
+void printNearbyNetworks() {
+    Serial.println("[IOT][WiFi] Scanning nearby networks...");
+    int count = WiFi.scanNetworks();
+    if (count <= 0) {
+        Serial.printf("[IOT][WiFi] Scan found no networks. result=%d\n", count);
+        return;
+    }
+
+    Serial.printf("[IOT][WiFi] Scan found %d networks:\n", count);
+    for (int i = 0; i < count; i++) {
+        Serial.printf("[IOT][WiFi]   ssid='%s' rssi=%d channel=%d enc=%d\n",
+                      WiFi.SSID(i).c_str(),
+                      WiFi.RSSI(i),
+                      WiFi.channel(i),
+                      WiFi.encryptionType(i));
+    }
+}
+}
 
 void IotClient::begin() {
     WiFi.mode(WIFI_STA);
@@ -50,6 +86,7 @@ EnrollmentCommand IotClient::pollEnrollmentCommand() {
     command.id = extractInt(payload, "id");
     command.templateId = extractInt(payload, "template_id");
     command.type = extractString(payload, "type");
+    command.userName = extractString(payload, "user_name");
     command.available = command.id > 0
         && command.templateId > 0
         && (command.type == "ENROLL_FINGERPRINT" || command.type == "DELETE_FINGERPRINT");
@@ -92,12 +129,7 @@ bool IotClient::sendEnrollmentResult(int commandId, bool success, int templateId
     return true;
 }
 
-bool IotClient::sendAccessLog(int userId, bool success, const String& status, int failCount) {
-    if (!ensureWiFi()) {
-        Serial.println("[IOT] WiFi unavailable, access log not sent.");
-        return false;
-    }
-
+bool IotClient::postAccessLog(int userId, bool success, const String& status, int failCount) {
     HTTPClient http;
     String url = buildUrl("/api/access-log");
     String body = "{";
@@ -105,25 +137,94 @@ bool IotClient::sendAccessLog(int userId, bool success, const String& status, in
     body += "\"status\":\"" + escapeJson(status) + "\",";
     body += "\"fail_count\":" + String(failCount) + ",";
     body += "\"user_id\":";
-    if (userId > 0) {
-        body += String(userId);
-    } else {
-        body += "null";
-    }
+    body += (userId > 0) ? String(userId) : "null";
     body += "}";
 
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
     int code = http.POST(body);
-    String response = http.getString();
     http.end();
 
     Serial.printf("[IOT] Access log sent. HTTP %d\n", code);
-    if (code < 200 || code >= 300) {
-        Serial.println(response);
+    return (code >= 200 && code < 300);
+}
+
+int IotClient::getBufferCount() {
+    logPrefs.begin("logbuf", true);
+    int n = logPrefs.getInt("n", 0);
+    logPrefs.end();
+    return n;
+}
+
+void IotClient::bufferAccessLog(int userId, bool success, const String& status, int failCount) {
+    logPrefs.begin("logbuf", false);
+    int n = logPrefs.getInt("n", 0);
+    if (n >= LOG_BUFFER_MAX) {
+        Serial.printf("[IOT][BUF] Buffer dolu (%d), en eski log silindi.\n", LOG_BUFFER_MAX);
+        for (int i = 0; i < n - 1; i++) {
+            logPrefs.putInt(("u" + String(i)).c_str(), logPrefs.getInt(("u" + String(i + 1)).c_str(), 0));
+            logPrefs.putBool(("s" + String(i)).c_str(), logPrefs.getBool(("s" + String(i + 1)).c_str(), false));
+            logPrefs.putString(("t" + String(i)).c_str(), logPrefs.getString(("t" + String(i + 1)).c_str(), ""));
+            logPrefs.putInt(("f" + String(i)).c_str(), logPrefs.getInt(("f" + String(i + 1)).c_str(), 0));
+        }
+        n = LOG_BUFFER_MAX - 1;
+    }
+    logPrefs.putInt(("u" + String(n)).c_str(), userId);
+    logPrefs.putBool(("s" + String(n)).c_str(), success);
+    logPrefs.putString(("t" + String(n)).c_str(), status.substring(0, 62));
+    logPrefs.putInt(("f" + String(n)).c_str(), failCount);
+    logPrefs.putInt("n", n + 1);
+    logPrefs.end();
+    Serial.printf("[IOT][BUF] Log buffera alindi. Toplam: %d\n", n + 1);
+}
+
+void IotClient::clearBuffer() {
+    logPrefs.begin("logbuf", false);
+    logPrefs.clear();
+    logPrefs.end();
+}
+
+void IotClient::flushBufferedLogs() {
+    if (!ensureWiFi()) return;
+
+    int n = getBufferCount();
+    if (n == 0) return;
+
+    Serial.printf("[IOT][BUF] %d bekleyen log gonderiliyor...\n", n);
+
+    logPrefs.begin("logbuf", true);
+    int sent = 0;
+    for (int i = 0; i < n; i++) {
+        int uid    = logPrefs.getInt(("u" + String(i)).c_str(), 0);
+        bool ok    = logPrefs.getBool(("s" + String(i)).c_str(), false);
+        String st  = logPrefs.getString(("t" + String(i)).c_str(), "");
+        int fc     = logPrefs.getInt(("f" + String(i)).c_str(), 0);
+        logPrefs.end();
+
+        if (postAccessLog(uid, ok, st, fc)) {
+            sent++;
+        }
+        logPrefs.begin("logbuf", true);
+    }
+    logPrefs.end();
+
+    if (sent == n) {
+        clearBuffer();
+        Serial.printf("[IOT][BUF] Tum %d log gonderildi, buffer temizlendi.\n", sent);
+    } else {
+        Serial.printf("[IOT][BUF] %d/%d log gonderilemedi, buffer korundu.\n", n - sent, n);
+    }
+}
+
+bool IotClient::sendAccessLog(int userId, bool success, const String& status, int failCount) {
+    if (!ensureWiFi()) {
+        Serial.println("[IOT] WiFi yok, log buffera aliniyor.");
+        bufferAccessLog(userId, success, status, failCount);
         return false;
     }
-    return true;
+
+    flushBufferedLogs();
+    return postAccessLog(userId, success, status, failCount);
 }
 
 bool IotClient::sendLockState(const String& lockStatus, const String& event) {
@@ -162,13 +263,124 @@ bool IotClient::ensureWiFi() {
         return true;
     }
 
+    static unsigned long lastDebugAt = 0;
+    const bool shouldDebug = millis() - lastDebugAt > 15000;
+    if (shouldDebug) {
+        lastDebugAt = millis();
+        Serial.printf("[IOT][WiFi] Connecting to ssid='%s' backend='%s'\n", WIFI_SSID, BACKEND_URL);
+    }
+
+    WiFi.disconnect(false);
+    delay(100);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     unsigned long startedAt = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - startedAt < WIFI_CONNECT_TIMEOUT_MS) {
         delay(250);
     }
 
-    return WiFi.status() == WL_CONNECTED;
+    wl_status_t status = WiFi.status();
+    if (status == WL_CONNECTED) {
+        Serial.printf("[IOT][WiFi] Connected. ip=%s rssi=%d\n",
+                      WiFi.localIP().toString().c_str(),
+                      WiFi.RSSI());
+        return true;
+    }
+
+    if (shouldDebug) {
+        Serial.printf("[IOT][WiFi] Connect failed. status=%d (%s)\n", status, wifiStatusName(status));
+        printNearbyNetworks();
+    }
+
+    return false;
+}
+
+int IotClient::keypadEnrollUser() {
+    if (!ensureWiFi()) {
+        Serial.println("[IOT][KEYPAD] WiFi yok, kullanici olusturulamadi.");
+        return -1;
+    }
+
+    HTTPClient http;
+    http.begin(buildUrl("/api/keypad-enroll"));
+    http.addHeader("Content-Type", "application/json");
+    int code = http.POST("{}");
+    String response = http.getString();
+    http.end();
+
+    if (code != 201) {
+        Serial.printf("[IOT][KEYPAD] Kullanici olusturulamadi. HTTP %d\n", code);
+        return -1;
+    }
+
+    int userId = extractInt(response, "user_id");
+    Serial.printf("[IOT][KEYPAD] Bos kullanici olusturuldu. user_id=%d\n", userId);
+    return userId;
+}
+
+bool IotClient::keypadDeleteUser(int templateId) {
+    if (!ensureWiFi()) {
+        Serial.println("[IOT][KEYPAD] WiFi yok, kullanici silinemedi.");
+        return false;
+    }
+
+    HTTPClient http;
+    http.begin(buildUrl("/api/keypad-delete/" + String(templateId)));
+    int code = http.sendRequest("DELETE");
+    http.end();
+
+    Serial.printf("[IOT][KEYPAD] Kullanici silindi. user_id=%d HTTP %d\n", templateId, code);
+    return (code >= 200 && code < 300);
+}
+
+bool IotClient::keypadDeleteAllUsers() {
+    if (!ensureWiFi()) {
+        Serial.println("[IOT][KEYPAD] WiFi yok, toplu silme yapilamadi.");
+        return false;
+    }
+
+    HTTPClient http;
+    http.begin(buildUrl("/api/keypad-delete-all"));
+    int code = http.sendRequest("DELETE");
+    http.end();
+
+    Serial.printf("[IOT][KEYPAD] Tum kullanicilar silindi. HTTP %d\n", code);
+    return (code >= 200 && code < 300);
+}
+
+void IotClient::saveUserName(int templateId, const String& name) {
+    Preferences p;
+    p.begin("usernames", false);
+    p.putString(String(templateId).c_str(), name.substring(0, 20));
+    p.end();
+}
+
+String IotClient::fetchUserName(int templateId) {
+    if (!ensureWiFi()) return loadUserName(templateId);
+
+    HTTPClient http;
+    http.begin(buildUrl("/api/users/" + String(templateId) + "/name"));
+    int code = http.GET();
+    if (code != 200) {
+        http.end();
+        return loadUserName(templateId);
+    }
+
+    String payload = http.getString();
+    http.end();
+
+    String name = extractString(payload, "name");
+    if (name.length() > 0) {
+        saveUserName(templateId, name);
+    }
+    return name.length() > 0 ? name : loadUserName(templateId);
+}
+
+String IotClient::loadUserName(int templateId) {
+    Preferences p;
+    p.begin("usernames", true);
+    String name = p.getString(String(templateId).c_str(), "");
+    p.end();
+    return name;
 }
 
 String IotClient::buildUrl(const String& path) const {

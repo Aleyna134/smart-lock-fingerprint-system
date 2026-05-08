@@ -157,6 +157,9 @@ void pollHardwareCommands() {
                 bool enrolled = fpManager.enrollFingerprint(command.templateId);
 
                 if (enrolled) {
+                    if (command.userName.length() > 0) {
+                        iotClient.saveUserName(command.templateId, command.userName);
+                    }
                     display.showMessage("Enrollment OK", "ID: " + String(command.templateId));
                     leds.success();
                     buzzer.beepSuccess();
@@ -367,21 +370,19 @@ void handleAdminMode() {
                 display.showMessage("SENSOR HATASI", "BAGLANTI YOK");
                 delay(2000);
             } else {
-                int count = fpManager.getStoredCount();
-                if (count < 0) {
-                    display.showMessage("SENSOR HATASI", "");
-                    delay(2000);
-                } else if (count >= FP_MAX_TEMPLATES) {
-                    display.showMessage("KAPASITE DOLU", "Silmek icin 4");
-                    buzzer.beepError();
-                    delay(2000);
+                display.showMessage("Backend...", "ID aliniyor");
+                int userId = iotClient.keypadEnrollUser();
+                if (userId <= 0) {
+                    display.showMessage("KAYIT HATASI", "Backend yok");
+                    leds.error(); buzzer.beepError();
+                    delay(2000); leds.allOff();
                 } else {
-                    int nextId = count + 1;
                     display.showMessage("YENI KAYIT", "Parmak Koyun");
-                    if (fpManager.enrollFingerprint(nextId)) {
-                        display.showMessage("KAYIT BASARILI", "ID: " + String(nextId));
+                    if (fpManager.enrollFingerprint(userId)) {
+                        display.showMessage("KAYIT BASARILI", "ID: " + String(userId));
                         leds.success(); buzzer.beepSuccess();
                     } else {
+                        iotClient.keypadDeleteUser(userId);
                         display.showMessage("KAYIT HATASI", "Tekrar Deneyin");
                         leds.error(); buzzer.beepError();
                     }
@@ -393,6 +394,7 @@ void handleAdminMode() {
         else if (mKey == '4') {
             display.showMessage("SILIYOR...", "Lutfen Bekleyin");
             if (fpManager.deleteAll()) {
+                iotClient.keypadDeleteAllUsers();
                 display.showMessage("TUMU SILINDI", "Sistem Sifirlandi");
                 leds.success(); buzzer.beepWelcome(); delay(1000); leds.allOff();
             } else {
@@ -448,7 +450,11 @@ void handleFingerprintAccess() {
     if (result.matched) {
         failedAttempts = 0;
         Serial.printf("[KAPI] ERISIM ONAYLANDI! (ID: %d, Guven: %d)\n", result.user_id, result.confidence);
-        display.showMessage("ERISIM ONAYLANDI", "Hosgeldiniz");
+        String userName = iotClient.fetchUserName(result.user_id);
+        int spaceIdx = userName.indexOf(' ');
+        String firstName = (spaceIdx > 0) ? userName.substring(0, spaceIdx) : userName;
+        String welcomeMsg = (firstName.length() > 0) ? firstName + " Hosgeldin" : "Hosgeldiniz";
+        display.showMessage("ERISIM ONAYLANDI", welcomeMsg);
         leds.success();
         buzzer.beepSuccess();
         Serial.println("[LOG] Backend success access log gonderiliyor...");
@@ -614,32 +620,24 @@ void loop() {
                     display.showMessage("SENSOR HATASI", "BAGLANTI YOK");
                     break;
                 }
-                
-                // Sıradaki boş ID'yi bul
-                // NOT: Bu yöntem yalnızca sıralı kayıt + toplu silme (c komutu) ile doğru çalışır.
-                // Tekli silme (deleteID) kullanılırsa ID çakışması olabilir.
-                int count = fpManager.getStoredCount();
-                if (count < 0) {
-                    Serial.println("[HATA] Kayit sayisi alinamadi!");
-                    display.showMessage("SENSOR HATASI", "");
-                    break;
-                }
-                if (count >= FP_MAX_TEMPLATES) {
-                    Serial.println("[HATA] Kayit kapasitesi dolu!");
-                    display.showMessage("KAPASITE DOLU", "Sil: 'c' komutu");
-                    buzzer.beepError();
-                    delay(2000);
+
+                display.showMessage("Backend...", "ID aliniyor");
+                int userId = iotClient.keypadEnrollUser();
+                if (userId <= 0) {
+                    display.showMessage("KAYIT HATASI", "Backend yok");
+                    leds.error(); buzzer.beepError();
+                    delay(2000); leds.allOff();
                     display.showMessage("Sistem Hazir", "Parmak/PIN");
                     break;
                 }
-                int nextId = count + 1;
-                Serial.printf("[>] Yeni kullanici ID: %d olarak belirlendi.\n", nextId);
-                
+
+                Serial.printf("[>] Backend user_id=%d, parmak kaydediliyor.\n", userId);
                 display.showMessage("YENI KAYIT", "Parmak Koyun");
-                if (fpManager.enrollFingerprint(nextId)) {
-                    display.showMessage("KAYIT BASARILI", "ID: " + String(nextId));
+                if (fpManager.enrollFingerprint(userId)) {
+                    display.showMessage("KAYIT BASARILI", "ID: " + String(userId));
                     leds.success(); buzzer.beepSuccess();
                 } else {
+                    iotClient.keypadDeleteUser(userId);
                     display.showMessage("KAYIT HATASI", "Tekrar Deneyin");
                     leds.error(); buzzer.beepError();
                 }
@@ -703,8 +701,9 @@ void loop() {
                 Serial.println("\n[>] Tum parmak izi kayitlari siliniyor...");
                 display.showMessage("SILIYOR...", "Lutfen Bekleyin");
                 if (fpManager.deleteAll()) {
+                    iotClient.keypadDeleteAllUsers();
                     display.showMessage("TUMU SILINDI", "Sistem Sifirlandi");
-                    Serial.println("[OK] Veritabani tertemiz.");
+                    Serial.println("[OK] Sensor ve backend temizlendi.");
                     leds.success(); buzzer.beepWelcome(); delay(1000); leds.allOff();
                 } else {
                     display.showMessage("SILME HATASI", "");
