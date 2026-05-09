@@ -74,7 +74,6 @@ npm run dev
 
 ## 👥 Katkıda Bulunanlar
 
-*   **Proje Geliştiricisi:** Hamza
 *   **Teknolojiler:** ESP32, Node.js, React
 
 ---
