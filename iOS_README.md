@@ -1,68 +1,92 @@
-# 📱 Smart Lock iOS Application — Teknik Dokümantasyon
+# 📱 Smart Lock iOS Application — Deep Technical Overview
 
-Bu doküman, Akıllı Parmak İzi Kilidi Sistemi'nin iOS istemcisinin mimarisini, kullanılan teknolojileri ve özelliklerini detaylandırmaktadır. Uygulama, modern Swift pratikleri ve Apple'ın en yeni framework'leri kullanılarak geliştirilmiştir.
-
----
-
-## 🏛️ Mimari ve State Yönetimi
-
-Uygulama, **MVVM (Model-View-ViewModel)** mimari deseni üzerine inşa edilmiştir.
-
-*   **SwiftUI:** Deklaratif kullanıcı arayüzü ile reaktif ve akıcı bir deneyim sağlanır.
-*   **Observation Framework:** Swift 5.9+ ile gelen `@Observable` makrosu kullanılarak, geleneksel `ObservableObject` yerine daha performanslı ve modern bir state yönetimi uygulanmıştır.
-*   **Dependency Injection:** `SessionManager` gibi merkezi servisler, `@Environment` aracılığıyla tüm görünümlere enjekte edilir.
+Bu doküman, Smart Lock ekosisteminin mobil ayağını oluşturan iOS uygulamasının yazılım mimarisini, veri akış protokollerini ve ileri seviye sistem entegrasyonlarını detaylandırmaktadır.
 
 ---
 
-## ✨ Öne Çıkan Özellikler
+## 🛠️ Yazılım Mimarisi ve State Yönetimi
 
-### 1. Canlı Etkinlikler (Live Activities) & Dynamic Island
-*   **WidgetKit:** Kapıdaki başarısız giriş denemeleri veya kritik güvenlik olayları, iPhone kilit ekranında ve Dynamic Island'da gerçek zamanlı olarak izlenebilir.
-*   **Push-to-Start:** Backend'den gelen özel bir push bildirimi ile Live Activity uzaktan başlatılabilir.
+Uygulama, Apple'ın en güncel geliştirme standartları (iOS 17+) baz alınarak tasarlanmıştır.
 
-### 2. Gelişmiş Bildirim Sistemi (APNs)
-*   **Anlık Uyarılar:** Kapıda yetkisiz bir erişim denemesi olduğunda kullanıcıya özel alarm sesi (`alert.wav`) ile bildirim gider.
-*   **Notification Service Extension:** Gelen bildirimlerin içeriği cihaz tarafında işlenerek zenginleştirilir.
-*   **Deep Linking:** Bildirime tıklandığında kullanıcı doğrudan ilgili uyarının (Alert) detay ekranına yönlendirilir.
+### 1. Modern MVVM & Observation
+*   **Reaktif Yapı:** `@Observable` makrosu (Swift 5.9+) kullanılarak verimli bir veri bağlama (Data Binding) sağlanmıştır. Bu sayede sadece değişen alanlar UI'da yeniden render edilir, bu da pil ve performans tasarrufu sağlar.
+*   **Separation of Concerns:** View'lar sadece arayüz deklarasyonundan sorumludur; tüm iş mantığı (Business Logic) ViewModel katmanında soyutlanmıştır.
 
-### 3. Biyometrik ve Güvenli Oturum
-*   **Keychain Integration:** Kullanıcı oturum bilgileri Apple'ın güvenli depolama birimi olan Keychain'de şifreli olarak saklanır; uygulama silinip yüklense bile (isteğe bağlı) oturum korunabilir.
-*   **Biometric Access Control:** Uygulama açılışında FaceID/TouchID desteği için altyapı mevcuttur.
+### 2. Dependency Injection (DI)
+*   **SessionManager:** Kullanıcı oturumu, ağ durumu ve global uygulama ayarları `Environment` üzerinden tüm hiyerarşiye dağıtılır.
+*   **Servis Katmanı:** API servisleri (`APIAuthService`, `APIUserService` vb.) protokol tabanlı (`Protocol-Oriented`) tasarlanmıştır, bu da kolay birim test (Unit Test) imkanı sağlar.
 
 ---
 
-## 🛠️ Teknik Bileşenler
+## 🚀 İleri Seviye Sistem Entegrasyonları
 
-### UI/UX Tasarım Dili
-*   **Semantik Renkler:** Light/Dark mode desteği için sistem renkleri kullanılmıştır.
-*   **SF Symbols:** Tüm ikonlar Apple'ın standart kütüphanesinden seçilerek görsel tutarlılık sağlanmıştır.
-*   **Animasyonlar:** SwiftUI'ın `spring()` ve `easeOut` animasyonları ile interaktif geçişler (örn: Yanlış girişte sallanma efekti - `ShakeEffect`) optimize edilmiştir.
+### 1. Live Activities & Dynamic Island Lifecycle
+Uygulama, kapıdaki kritik olayları anlık olarak kilit ekranına taşır:
+*   **Başlatma:** Backend'den gelen `push-to-start` token'ı ile uygulama kapalı olsa dahi Live Activity başlatılabilir.
+*   **Güncelleme:** Kapı açıldığında veya kilitlendiğinde Dynamic Island içeriği asenkron olarak güncellenir.
+*   **Sonlandırma:** Olay çözüldüğünde veya zaman aşımına uğradığında otomatik temizleme mekanizması çalışır.
 
-### Network Katmanı
-*   **Async/Await:** Tüm ağ istekleri Swift'in modern concurrency yapısı ile yönetilir.
-*   **URLSession:** Üçüncü taraf kütüphane (Alamofire vb.) kullanılmadan, native ve hafif bir network katmanı oluşturulmuştur.
+### 2. Güvenlik ve Kimlik Doğrulama (Keychain)
+*   **Güvenli Depolama:** Kullanıcı şifreleri veya token'ları `UserDefaults` yerine donanım seviyesinde şifrelenmiş **Keychain** içerisinde saklanır.
+*   **Biyometrik Yerel Kilitleme:** Uygulama açılışında `LocalAuthentication` framework'ü ile cihaz sahibi doğrulaması yapılır.
 
----
-
-## 📡 Backend Haberleşme Protokolü
-
-| Endpoint | Method | Amaç |
-| :--- | :--- | :--- |
-| `/api/login` | POST | Kullanıcı girişi ve session oluşturma. |
-| `/api/status` | GET | Kilidin anlık durumunu Dashboard'da gösterme. |
-| `/api/logs` | GET | Erişim tarihçesini kronolojik listeleme. |
-| `/api/device-token` | POST | APNs token kaydı (Bildirimler için). |
-| `/api/alerts/read-all` | PATCH | Tüm güvenlik uyarılarını okundu işaretleme. |
+### 3. Push Bildirimleri ve APNs (Apple Push Notification service)
+*   **Özel Payload İşleme:** Gelen bildirimlerin içindeki `alert_id` ve `severity` bilgileri, `NotificationServiceExtension` tarafından okunur.
+*   **Rich Notifications:** Bildirimler sadece metin değil, alarm sesleri (`alert.wav`) ve aksiyon butonları içerir.
 
 ---
 
-## 📦 Kurulum ve Gereksinimler
+## 🎨 UI/UX Bileşenleri ve Animasyonlar
 
-1.  **Xcode:** 15.0+ sürümü gereklidir.
-2.  **iOS Sürümü:** Target iOS 17.0+ olarak belirlenmiştir.
-3.  **Konfigürasyon:** `NetworkConfig.swift` dosyasındaki `baseURL` değerini backend sunucu adresinizle güncelleyin.
-4.  **Push Bildirimleri:** Push bildirimlerini test etmek için bir **Apple Developer Program** üyeliği ve fiziksel bir iOS cihazı gereklidir.
+*   **Custom View Components:**
+    *   `StatusCard`: Gerçek zamanlı sensör verilerini gösteren cam (Glassmorphism) efektli kartlar.
+    *   `AccessLogRow`: Morphing animasyonları ile açılan detaylı log satırları.
+    *   `AvatarSystem`: İsimden hash üreterek kişiye özel deterministik renk atayan avatar motoru.
+*   **Haptic Feedback:** Başarılı girişlerde `UINotificationFeedbackGenerator(.success)`, hatalarda `.error` ile fiziksel geri bildirim sağlanır.
+*   **Motion Design:** SwiftUI `MatchedGeometryEffect` kullanılarak Dashboard ve Detay ekranları arasında akıcı geçişler sağlanmıştır.
 
 ---
 
-*Bu mobil uygulama, Smart Lock ekosisteminin son kullanıcıya temas eden en kritik ayağını oluşturmaktadır.*
+## 📡 Detaylı API İletişim Şeması
+
+Uygulama, backend ile JSON tabanlı RESTful protokol üzerinden haberleşir.
+
+**Örnek Login Akışı:**
+```swift
+// Request Payload
+struct LoginRequest: Encodable {
+    let email: String
+    let password: String
+}
+
+// Response Handling
+if let user = try? JSONDecoder().decode(User.self, from: data) {
+    self.sessionManager.login(user)
+    self.notificationManager.registerDeviceToken()
+}
+```
+
+---
+
+## 📁 Klasör Yapısı (Project Structure)
+
+```text
+Microprocessors_Project_IOS/
+├── Auth/               # Giriş, Kayıt, Şifre işlemleri
+├── Main/               # TabBar ve Ana Navigasyon
+├── Screens/            # Dashboard, Logs, Users, Alerts, Settings
+├── Models/             # Veri yapıları (User, Log, Alert)
+├── Services/           # API ve Push servisleri
+├── LiveActivity/       # WidgetKit ve Dynamic Island kodları
+└── Assets/             # İkonlar, Renkler ve Alarm sesleri
+```
+
+---
+
+## 📦 Dağıtım ve Test
+*   **TestFlight:** Uygulama beta testleri için hazır haldedir.
+*   **CI/CD:** GitHub Actions üzerinden otomatik build altyapısı kurgulanabilir.
+
+---
+
+*Bu uygulama, endüstriyel standartlarda bir IoT kullanıcı deneyimi sunmak üzere optimize edilmiştir.*

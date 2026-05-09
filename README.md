@@ -1,113 +1,121 @@
-# 🔒 Akıllı Parmak İzi & PIN Kilidi Sistemi (Enterprise IoT Solution)
+# 🔒 Akıllı Parmak İzi & PIN Kilidi Sistemi (Enterprise-Grade IoT Ecosystem)
 
-Bu proje, biyometrik veri güvenliği ve gerçek zamanlı IoT haberleşmesini temel alan, uçtan uca entegre bir akıllı kilit çözümüdür. Sistem; **ESP32 tabanlı gömülü yazılım**, **Node.js/Prisma API katmanı** ve **React yönetim paneli** üzerinden tam kontrol sağlar.
-
----
-
-## 🏛️ Sistem Mimarisi ve Teknoloji Yığını
-
-Sistem, dağıtık bir yapıda üç ana katmandan oluşur:
-
-### 1. Gömülü Sistem (Hardware & Firmware)
-*   **Mikrodenetleyici:** ESP32-WROOM (Dual-core, WiFi/BT desteği).
-*   **Biyometrik Sensör:** R307/R503 Parmak İzi Sensörü (512 parmak kapasitesi, <0.3s tanıma süresi).
-*   **Arayüz:** 4x4 Matris Keypad (PIN girişi), 16x2 I2C LCD (Kullanıcı etkileşimi), Buzzer & LED (Görsel-işitsel geri bildirim).
-*   **Yazılım:** C++ (Arduino/PlatformIO), Non-blocking event loop mimarisi.
-
-### 2. Backend API Katmanı (Cloud & Local)
-*   **Runtime:** Node.js (Express Framework).
-*   **ORM:** Prisma (Tip güvenli veritabanı erişimi).
-*   **Veritabanı:** SQLite/PostgreSQL (İlişkisel veri yönetimi).
-*   **Haberleşme:** RESTful API katmanı üzerinden donanım-backend senkronizasyonu.
-*   **Bildirim Motoru:** SMTP (Email) entegrasyonu.
-
-### 3. Yönetim Paneli (Web Interface)
-*   **Frontend:** React (Vite).
-*   **State Yönetimi:** Hooks & Context API.
-*   **Veri Görselleştirme:** Dinamik log tabloları ve sistem durumu kartları.
+Bu proje; biyometrik veri güvenliği, asenkron donanım yönetimi ve gerçek zamanlı mobil bildirimleri birleştiren, yüksek ölçeklenebilir bir IoT akıllı kilit çözümüdür. Sistem; **ESP32 Gömülü Sistem**, **Node.js/Prisma API Katmanı** ve **React Yönetim Paneli**'nden oluşan tam entegre bir ekosistemdir.
 
 ---
 
-## 🛠️ Teknik Detaylar ve Protokoller
+## 🏛️ Katmanlı Sistem Mimarisi
 
-### 🔑 Güvenlik ve Kimlik Doğrulama
-*   **Biyometrik Veri:** Parmak izi şablonları sensörün güvenli bölgesinde tutulur; backend sadece `template_id` ve eşleşme sonucunu yönetir.
-*   **Şifreleme:** Kullanıcı şifreleri veritabanında **Bcrypt** (cost: 10) algoritması ile tuzlanarak (salted) saklanır.
-*   **Lockout Mekanizması:** 3 kez hatalı giriş denemesinde donanım ve yazılım seviyesinde 30 saniyelik "Cool-down" süreci tetiklenir.
-*   **Admin Yetkilendirme:** Sadece Admin rolüne sahip kullanıcılar yeni kullanıcı ekleyebilir, silebilir veya sistem ayarlarını değiştirebilir.
+Sistem, "Single Source of Truth" prensibiyle çalışır; tüm donanım durumları ve yetkilendirmeler merkezi backend tarafından yönetilir.
 
-### 📡 Donanım-Backend Haberleşmesi
-Sistem, donanım komutlarını yönetmek için bir **Command Queue** yapısı kullanır:
-1.  Admin web panelinden "Kullanıcı Ekle" butonuna basar.
-2.  Backend, veritabanında bir `HardwareCommand (ENROLL)` kaydı oluşturur.
-3.  ESP32, her 5 saniyede bir `/api/hardware/commands/next` endpoint'ini pollar.
-4.  ESP32 komutu alır, sensörü aktif eder ve sonucu `/api/hardware/commands/:id/result` üzerinden backend'e bildirir.
+### 1. Donanım & Gömülü Yazılım (Firmware)
+*   **Çekirdek:** ESP32-WROOM (Dual-Core 240MHz).
+*   **Biyometrik Modül:** R307/R503 (Optik/Kapasitif seçenekli). 
+*   **Kullanılan Kütüphaneler:**
+    *   `Adafruit Fingerprint Sensor Library` (Biyometrik yönetim).
+    *   `LiquidCrystal_I2C` (LCD sürücüsü).
+    *   `Keypad` (Matris tarama algoritması).
+    *   `HTTPClient` & `WiFi` (Backend senkronizasyonu).
+*   **Mimarisi:** Non-blocking `loop()`, asenkron polling ve fail-safe (Brown-out) koruması.
+
+### 2. Backend & Veri Katmanı
+*   **Framework:** Node.js (Express v4).
+*   **Veritabanı Motoru:** SQLite (Lokal test) / PostgreSQL (Üretim).
+*   **ORM:** Prisma (Tip-güvenli sorgular ve otomatik migrasyonlar).
+*   **Güvenlik:**
+    *   **Argon2/Bcrypt:** Şifre hashleme.
+    *   **JWT (İleri Hazırlık):** Bearer token altyapısı.
+    *   **Sanitization:** Donanım girişlerinin ve API request'lerinin sıkı validasyonu.
+
+### 3. Yönetim Paneli (Web)
+*   **Framework:** React 18 (Vite tabanlı).
+*   **UI:** Modern Dashboard, Reaktif Liste bileşenleri.
+*   **İletişim:** Axios tabanlı API istemcisi.
 
 ---
 
-## 🔌 Donanım Bağlantı Şeması (Pinout)
+## 🛠️ Teknik Derin Dalış (Deep Dive)
 
-| Bileşen | ESP32 Pin | Açıklama |
+### 📡 Donanım Komut Kuyruğu (Hardware Command Queue)
+Sistem, donanımı doğrudan tetiklemek yerine bir "Komut Kuyruğu" mimarisi kullanır. Bu sayede donanım, internet kesintisi olsa bile tekrar çevrimiçi olduğunda bekleyen görevleri (Yeni kayıt, silme) sırasıyla işler.
+
+**Akış Şeması (Kullanıcı Kaydı):**
+1.  **Web Panel:** `POST /api/users` isteği gönderir.
+2.  **Backend:** Kullanıcıyı `PENDING` statüsünde oluşturur ve bir `HardwareCommand` üretir.
+3.  **ESP32:** `GET /api/hardware/commands/next` ile komutu "Claim" eder.
+4.  **ESP32:** Fiziksel sensörde parmak izini alır, sonucu `POST /api/hardware/commands/:id/result` ile bildirir.
+5.  **Backend:** Kayıt başarılıysa kullanıcıyı `ENROLLED` statüsüne çeker.
+
+### 🔒 Güvenlik Protokolü (Security Lockout)
+Hizmet dışı bırakma saldırılarına karşı hibrit bir koruma mevcuttur:
+-   **Donanım Seviyesi:** 3 hatalı denemede ESP32 `lockedUntil` değişkenini aktif ederek 30 saniye boyunca parmak okumayı durdurur.
+-   **Yazılım Seviyesi:** Backend, gelen `fail_count` değerine göre kritik alertler üretir ve e-posta tetikleyicilerini çalıştırır.
+
+---
+
+## 📊 Veritabanı Şeması (Data Models)
+
+| Model | Açıklama |
+| :--- | :--- |
+| **User** | ID, İsim, Email (Unique), Password (Hashed), Role (Admin/User), Enrollment Status. |
+| **Log** | Success (Bool), Status (Mesaj), Time, Fail Count, User Reference. |
+| **Alert** | Type (Critical/Warning), Severity, Status (Unread/Read), Log Link. |
+| **HardwareCommand** | Type (Enroll/Delete), Status (Pending/Claimed/Done), Device ID. |
+| **SystemState** | Anlık kilit durumu (Locked/Unlocked) ve son senkronizasyon zamanı. |
+
+---
+
+## 📁 API Referansı & JSON Örnekleri
+
+### 1. Erişim Logu Gönderme
+`POST /api/access-log`
+```json
+{
+  "success": false,
+  "status": "Hatali Parmak Izi",
+  "fail_count": 2,
+  "user_id": null
+}
+```
+
+### 2. Donanım Komutu Sorgulama
+`GET /api/hardware/commands/next?device_id=lock-1`
+```json
+{
+  "command": {
+    "id": 42,
+    "type": "ENROLL_FINGERPRINT",
+    "user_id": 10,
+    "user_name": "Ahmet Yilmaz"
+  }
+}
+```
+
+---
+
+## 🔌 Donanım Konfigürasyonu (Pinout)
+
+Sistem, ESP32'nin tüm donanım özelliklerini optimize ederek kullanır:
+
+| Fonksiyon | Pin | Detay |
 | :--- | :--- | :--- |
-| **Parmak İzi Sensörü (RX)** | GPIO 16 | Serial2 RX |
-| **Parmak İzi Sensörü (TX)** | GPIO 17 | Serial2 TX |
-| **I2C LCD (SDA)** | GPIO 21 | Standard I2C |
-| **I2C LCD (SCL)** | GPIO 22 | Standard I2C |
-| **Röle (Kilit)** | GPIO 18 | Aktif Düşük (Active Low) |
-| **Buzzer** | GPIO 19 | PWM/Digital Out |
-| **Keypad** | GPIO 12, 14, 27, 26, 25, 33, 32, 4 | Matrix Rows/Cols |
+| **Serial2 RX (FP)** | GPIO 16 | Sensör veri alımı |
+| **Serial2 TX (FP)** | GPIO 17 | Sensör komut gönderimi |
+| **I2C SDA (LCD)** | GPIO 21 | Veri hattı |
+| **I2C SCL (LCD)** | GPIO 22 | Saat hattı |
+| **Relay Signal** | GPIO 18 | Kilit kontrolü (Inverted) |
+| **Buzzer** | GPIO 19 | Alarm ve Onay tonları |
+| **Keypad Rows** | 12, 14, 27, 26 | Satır tarama |
+| **Keypad Cols** | 25, 33, 32, 4 | Sütun okuma |
 
 ---
 
-## 📁 API Endpoint Dokümantasyonu
+## 👥 Katkıda Bulunanlar ve İletişim
 
-### Kullanıcı İşlemleri
-*   `POST /api/login`: Kimlik doğrulama.
-*   `GET /api/users`: Tüm kullanıcıları listeleme.
-*   `POST /api/users`: Yeni kullanıcı oluşturma (Admin yetkisi gerekir).
-*   `DELETE /api/users/:id`: Kullanıcı silme (Donanım komut kuyruğuna eklenir).
-
-### Donanım ve Loglama
-*   `POST /api/access-log`: Donanımdan gelen başarılı/başarısız erişim verisi.
-*   `GET /api/status`: Kilidin anlık durumu (Locked/Unlocked) ve sistem sağlığı.
-*   `POST /api/hardware/state`: Donanımın fiziksel kilit durumunu backend'e bildirmesi.
-*   `GET /api/logs`: Tüm erişim tarihçesi.
+*   **Ekosistem Sahibi:** Smart Lock Project Team
+*   **Teknolojiler:** ESP32, Node.js, React, Prisma, SwiftUI
+*   **Lisans:** Akademik Kullanım
 
 ---
 
-## 🚀 Kurulum ve Yapılandırma
-
-### 1. Sunucu Tarafı
-```bash
-# Bağımlılıkları yükle
-npm install
-
-# Veritabanı şemasını hazırla
-npx prisma migrate dev --name init
-
-# Sunucuyu başlat
-npm start
-```
-
-### 2. Gömülü Sistem Tarafı
-1.  `firmware/esp32` dizinindeki `network_config.local.h` dosyasını oluşturun.
-2.  `WIFI_SSID`, `WIFI_PASS` ve `BACKEND_URL` tanımlamalarını yapın.
-3.  PlatformIO üzerinden "Upload" butonuna basarak kodu ESP32'ye yükleyin.
-
-### 3. Web Arayüzü
-```bash
-cd web
-npm install
-npm run dev
-```
-
----
-
-## 📈 Gelecek Geliştirmeler
-- [ ] OTP (Tek kullanımlık şifre) desteği.
-- [ ] MQTT protokolüne geçiş (Daha düşük gecikme süresi).
-- [ ] Yüz tanıma modülü entegrasyonu.
-
----
-
-*Bu proje, mikroişlemci tabanlı güvenlik sistemlerinin tasarımı ve uygulanması amacıyla geliştirilmiş bir akademik çalışmadır.*
+*Bu doküman, sistemin teknik yeterliliğini ve mimari bütünlüğünü kanıtlamak amacıyla sunum dosyası olarak hazırlanmıştır.*
