@@ -1,121 +1,94 @@
-# 🔒 Akıllı Parmak İzi & PIN Kilidi Sistemi (Enterprise-Grade IoT Ecosystem)
+# 🔒 Akıllı Parmak İzi & PIN Kilidi Sistemi (Exhaustive Technical Manual)
 
-Bu proje; biyometrik veri güvenliği, asenkron donanım yönetimi ve gerçek zamanlı mobil bildirimleri birleştiren, yüksek ölçeklenebilir bir IoT akıllı kilit çözümüdür. Sistem; **ESP32 Gömülü Sistem**, **Node.js/Prisma API Katmanı** ve **React Yönetim Paneli**'nden oluşan tam entegre bir ekosistemdir.
-
----
-
-## 🏛️ Katmanlı Sistem Mimarisi
-
-Sistem, "Single Source of Truth" prensibiyle çalışır; tüm donanım durumları ve yetkilendirmeler merkezi backend tarafından yönetilir.
-
-### 1. Donanım & Gömülü Yazılım (Firmware)
-*   **Çekirdek:** ESP32-WROOM (Dual-Core 240MHz).
-*   **Biyometrik Modül:** R307/R503 (Optik/Kapasitif seçenekli). 
-*   **Kullanılan Kütüphaneler:**
-    *   `Adafruit Fingerprint Sensor Library` (Biyometrik yönetim).
-    *   `LiquidCrystal_I2C` (LCD sürücüsü).
-    *   `Keypad` (Matris tarama algoritması).
-    *   `HTTPClient` & `WiFi` (Backend senkronizasyonu).
-*   **Mimarisi:** Non-blocking `loop()`, asenkron polling ve fail-safe (Brown-out) koruması.
-
-### 2. Backend & Veri Katmanı
-*   **Framework:** Node.js (Express v4).
-*   **Veritabanı Motoru:** SQLite (Lokal test) / PostgreSQL (Üretim).
-*   **ORM:** Prisma (Tip-güvenli sorgular ve otomatik migrasyonlar).
-*   **Güvenlik:**
-    *   **Argon2/Bcrypt:** Şifre hashleme.
-    *   **JWT (İleri Hazırlık):** Bearer token altyapısı.
-    *   **Sanitization:** Donanım girişlerinin ve API request'lerinin sıkı validasyonu.
-
-### 3. Yönetim Paneli (Web)
-*   **Framework:** React 18 (Vite tabanlı).
-*   **UI:** Modern Dashboard, Reaktif Liste bileşenleri.
-*   **İletişim:** Axios tabanlı API istemcisi.
+Bu döküman, projenin kaynak kodlarının (Gömülü Yazılım ve Backend) derinlemesine analiziyle hazırlanmış, sistemin tüm iç mantığını açıklayan teknik bir kılavuzdur. Bu dökümanı okuyan bir geliştirici, kaynak kodlara bakmadan tüm sistem akışını anlayabilir.
 
 ---
 
-## 🛠️ Teknik Derin Dalış (Deep Dive)
+## 🏛️ 1. Gömülü Yazılım (ESP32 Firmware) Analizi
 
-### 📡 Donanım Komut Kuyruğu (Hardware Command Queue)
-Sistem, donanımı doğrudan tetiklemek yerine bir "Komut Kuyruğu" mimarisi kullanır. Bu sayede donanım, internet kesintisi olsa bile tekrar çevrimiçi olduğunda bekleyen görevleri (Yeni kayıt, silme) sırasıyla işler.
+ESP32 yazılımı, `main.cpp` üzerinde koşan asenkron bir `event loop` mimarisine sahiptir. Donanım bileşenleri (Keypad, Parmak İzi, LCD) birbirinden bağımsız sınıflar (`Manager`) tarafından yönetilir.
 
-**Akış Şeması (Kullanıcı Kaydı):**
-1.  **Web Panel:** `POST /api/users` isteği gönderir.
-2.  **Backend:** Kullanıcıyı `PENDING` statüsünde oluşturur ve bir `HardwareCommand` üretir.
-3.  **ESP32:** `GET /api/hardware/commands/next` ile komutu "Claim" eder.
-4.  **ESP32:** Fiziksel sensörde parmak izini alır, sonucu `POST /api/hardware/commands/:id/result` ile bildirir.
-5.  **Backend:** Kayıt başarılıysa kullanıcıyı `ENROLLED` statüsüne çeker.
+### 🧬 1.1 Parmak İzi Yönetimi (`FingerprintManager`)
+Sistemin en kritik parçasıdır. R307 sensörünün flash belleği bozuk olduğundan, veriler **ESP32 NVS (Non-Volatile Storage)** üzerinde saklanır.
 
-### 🔒 Güvenlik Protokolü (Security Lockout)
-Hizmet dışı bırakma saldırılarına karşı hibrit bir koruma mevcuttur:
--   **Donanım Seviyesi:** 3 hatalı denemede ESP32 `lockedUntil` değişkenini aktif ederek 30 saniye boyunca parmak okumayı durdurur.
--   **Yazılım Seviyesi:** Backend, gelen `fail_count` değerine göre kritik alertler üretir ve e-posta tetikleyicilerini çalıştırır.
+*   **Veri Depolama Stratejisi:**
+    *   Parmak izi şablonu (template) sensörden `UpChar` komutuyla 1024-byte'lık paketler halinde çekilir.
+    *   Bu paketler ESP32'nin NVS alanına `fp_[ID]` anahtarıyla kaydedilir.
+    *   **Doğrulama (Verification) Akışı:** 
+        1. Yeni parmak sensöre konur ve geçici belleğe (Buffer 2) alınır.
+        2. ESP32, NVS'deki tüm kayıtlı şablonları döngüye sokar.
+        3. Her şablon `DownChar` ile sensörün Buffer 1'ine geri yüklenir.
+        4. Sensör içinde `Match` (1:1) işlemi yapılır. Bu işlem, sensörün 1:N arama özelliğinin donanımsal arızasından dolayı yazılımsal olarak simüle edilmesidir.
 
----
+### ⌨️ 1.2 Keypad ve PIN Güvenliği (`KeypadManager`)
+4x4 matris keypad üzerinden 4-8 hane arası PIN girişi yönetilir.
 
-## 📊 Veritabanı Şeması (Data Models)
+*   **PIN Doğrulama Mantığı:**
+    *   **Giriş:** `#` tuşu onayla, `C` iptal, `*` silme işlemini yapar.
+    *   **Maskeleme:** LCD ekranında rakamlar 600ms görünüp sonra `*` karakterine dönüşür.
+    *   **Lockout (Kilitleme) State Machine:**
+        1. `_wrongAttempts` sayacı her hatalı girişte artar.
+        2. Sayaç 3'e ulaştığında `_isLockedOut` true olur ve `_lockoutStart` zamanı kaydedilir.
+        3. 30 saniye boyunca `verifyPin()` fonksiyonu doğrudan false döner ve donanım hiçbir girişi kabul etmez.
 
-| Model | Açıklama |
-| :--- | :--- |
-| **User** | ID, İsim, Email (Unique), Password (Hashed), Role (Admin/User), Enrollment Status. |
-| **Log** | Success (Bool), Status (Mesaj), Time, Fail Count, User Reference. |
-| **Alert** | Type (Critical/Warning), Severity, Status (Unread/Read), Log Link. |
-| **HardwareCommand** | Type (Enroll/Delete), Status (Pending/Claimed/Done), Device ID. |
-| **SystemState** | Anlık kilit durumu (Locked/Unlocked) ve son senkronizasyon zamanı. |
+### 🌐 1.3 IoT Haberleşme Katmanı (`IotClient`)
+HTTP/REST protokolü üzerinden backend ile konuşur.
 
----
-
-## 📁 API Referansı & JSON Örnekleri
-
-### 1. Erişim Logu Gönderme
-`POST /api/access-log`
-```json
-{
-  "success": false,
-  "status": "Hatali Parmak Izi",
-  "fail_count": 2,
-  "user_id": null
-}
-```
-
-### 2. Donanım Komutu Sorgulama
-`GET /api/hardware/commands/next?device_id=lock-1`
-```json
-{
-  "command": {
-    "id": 42,
-    "type": "ENROLL_FINGERPRINT",
-    "user_id": 10,
-    "user_name": "Ahmet Yilmaz"
-  }
-}
-```
+*   **Offline Loglama (Buffering):** İnternet kesilirse loglar kaybolmaz. ESP32 NVS içinde `logbuf` alanına 50 adede kadar log kaydedilir. İnternet geldiğinde `flushBufferedLogs()` fonksiyonu bu logları sırayla backend'e basar.
+*   **Polling Mekanizması:** Donanım her 5-10 saniyede bir `/api/hardware/commands/next` endpoint'ini kontrol eder. Bu, donanımın arkasında (NAT/Firewall) olduğu durumlarda backend'den komut alabilmesini sağlar.
 
 ---
 
-## 🔌 Donanım Konfigürasyonu (Pinout)
+## ⚙️ 2. Backend & API Analizi (`index.js`)
 
-Sistem, ESP32'nin tüm donanım özelliklerini optimize ederek kullanır:
+Node.js tabanlı backend, donanım ile kullanıcı arayüzü (Web/Mobil) arasında bir orkestratör görevi görür.
 
-| Fonksiyon | Pin | Detay |
-| :--- | :--- | :--- |
-| **Serial2 RX (FP)** | GPIO 16 | Sensör veri alımı |
-| **Serial2 TX (FP)** | GPIO 17 | Sensör komut gönderimi |
-| **I2C SDA (LCD)** | GPIO 21 | Veri hattı |
-| **I2C SCL (LCD)** | GPIO 22 | Saat hattı |
-| **Relay Signal** | GPIO 18 | Kilit kontrolü (Inverted) |
-| **Buzzer** | GPIO 19 | Alarm ve Onay tonları |
-| **Keypad Rows** | 12, 14, 27, 26 | Satır tarama |
-| **Keypad Cols** | 25, 33, 32, 4 | Sütun okuma |
+### 📝 2.1 Donanım Komut Kuyruğu (Hardware Command Queue)
+Donanım üzerinde yapılan işlemler (Kayıt silme, yeni parmak ekleme) asenkron çalışır.
 
----
+*   **Akış:**
+    1. Kullanıcı isteği backend'e gelir → `HardwareCommand` tablosuna `PENDING` olarak yazılır.
+    2. Donanım bu komutu `poll` eder → `CLAIMED` durumuna geçer.
+    3. İşlem donanımda biter → Donanım `/result` endpoint'ine sonuç döner → Komut `DONE` veya `FAILED` olur.
+    4. Bu yapı sayesinde donanım anlık offline olsa bile işlem kuyrukta bekler.
 
-## 👥 Katkıda Bulunanlar ve İletişim
+### 🔔 2.2 Bildirim ve Alert Sistemi
+Backend, her log girişini analiz ederek kritiklik seviyesini belirler.
 
-*   **Ekosistem Sahibi:** Smart Lock Project Team
-*   **Teknolojiler:** ESP32, Node.js, React, Prisma, SwiftUI
-*   **Lisans:** Akademik Kullanım
+*   **Alert Türetme:** Eğer bir logda `success: false` ve `fail_count >= 3` ise otomatik olarak `CRITICAL` seviyesinde bir `Alert` nesnesi oluşturulur.
+*   **Push Notification (APNs):** Yeni bir alert oluştuğunda backend, `DeviceToken` tablosundaki tüm aktif iOS cihazlara Apple Push Notification servisi üzerinden bildirim gönderir.
+*   **Email Alert:** `CRITICAL` alertler, admin e-posta adresine SMTP üzerinden anında raporlanır.
 
 ---
 
-*Bu doküman, sistemin teknik yeterliliğini ve mimari bütünlüğünü kanıtlamak amacıyla sunum dosyası olarak hazırlanmıştır.*
+## 🔗 3. Sistem Entegrasyon Akışları (Sequence Diagrams)
+
+### 3.1 Yeni Kullanıcı Kayıt Akışı
+1.  **Web:** `POST /api/users` (Admin).
+2.  **Backend:** `Prisma.User.create` + `Prisma.HardwareCommand.create(ENROLL)`.
+3.  **ESP32:** `IotClient::pollEnrollmentCommand()` → "Kayıt Modu" aktifleşir.
+4.  **Hardware:** LCD: "Parmak Koyun" → Sensör parmağı NVS'ye kaydeder.
+5.  **ESP32:** `IotClient::sendEnrollmentResult(success: true)`.
+6.  **Backend:** `Prisma.User.update(status: ENROLLED)`.
+
+### 3.2 Yetkisiz Erişim Akışı
+1.  **Hardware:** Yanlış parmak okutuldu (Deneme 3).
+2.  **ESP32:** `IotClient::sendAccessLog(success: false, fail_count: 3)`.
+3.  **Backend:**
+    *   `Log` tablosuna kaydet.
+    *   `Alert` tablosuna `CRITICAL` uyarısı oluştur.
+    *   `PushDelivery` kuyruğuna tüm adminleri ekle.
+    *   SMTP üzerinden Admin'e "Güvenlik İhlali" maili at.
+
+---
+
+## 🛠️ 4. Veritabanı Modeli Detayları
+
+*   **`User`**: Kimlik bilgilerini ve `enrollment_status` (Kayıt aşaması) bilgisini tutar.
+*   **`HardwareCommand`**: Donanıma gönderilen görevleri ve bunların durumlarını (Pending/Claimed/Done) takip eder.
+*   **`PushDelivery`**: Push bildirimlerinin başarılı olup olmadığını, kaç kez denendiğini ve hata loglarını saklar.
+*   **`SystemState`**: Kilidin fiziksel durumunu (Locked/Unlocked) tutan tekil satırlık (Singleton) bir tablodur.
+
+---
+
+*Bu döküman, sistemin tüm katmanlarını teknik olarak şeffaf hale getirmek için kod bazlı analizle oluşturulmuştur.*
