@@ -55,6 +55,19 @@ model DeviceToken {
   deliveries PushDelivery[]
 }
 
+model LiveActivityToken {
+  id         Int      @id @default(autoincrement())
+  token      String   @unique
+  user_id    Int?
+  token_type String   @default("push_to_start")
+  platform   String   @default("ios")
+  is_active  Boolean  @default(true)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@index([is_active, token_type])
+}
+
 model PushDelivery {
   id              Int      @id @default(autoincrement())
   alert_id        Int

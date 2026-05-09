@@ -71,6 +71,8 @@ const PUSH_RETRY_MAX_MS = numberFromEnv('PUSH_RETRY_MAX_MS', 15 * 60 * 1000);
 const APNS_EXPIRATION_SECONDS = numberFromEnv('APNS_EXPIRATION_SECONDS', 7 * 24 * 60 * 60);
 const ALERT_PUSH_COOLDOWN_SECONDS = numberFromEnv('ALERT_PUSH_COOLDOWN_SECONDS', 30);
 const ALERT_EMAIL_COOLDOWN_SECONDS = numberFromEnv('ALERT_EMAIL_COOLDOWN_SECONDS', 60);
+const LIVE_ACTIVITY_PUSH_TO_START_ENABLED = process.env.LIVE_ACTIVITY_PUSH_TO_START_ENABLED !== 'false';
+const LIVE_ACTIVITY_ALERT_TIMEOUT_SECONDS = numberFromEnv('LIVE_ACTIVITY_ALERT_TIMEOUT_SECONDS', 30);
 
 const EMAIL_ALERT_TYPES = new Set(['MULTIPLE_FAILED_ATTEMPTS']);
 
@@ -241,6 +243,65 @@ function buildApnsPayload(alert, unreadCount) {
     };
 }
 
+function appleReferenceDateSeconds(date = new Date()) {
+    return Math.floor(date.getTime() / 1000) - 978307200;
+}
+
+function buildLiveActivityStartPayload(alert, log) {
+    const failCount = Number(log?.fail_count || 0);
+    const isCritical = failCount >= 3 || alert.severity === 'CRITICAL';
+    const securityState = isCritical ? 'lockdown' : 'warning';
+
+    return {
+        aps: {
+            timestamp: Math.floor(Date.now() / 1000),
+            event: 'start',
+            alert: {
+                title: alert.title,
+                body: alert.detail
+            },
+            'attributes-type': 'SmartLockLiveActivityAttributes',
+            attributes: {
+                activityId: `alert-${alert.id}`
+            },
+            'content-state': {
+                lockStatus: 'locked',
+                securityState,
+                lastEvent: alert.title,
+                failCount,
+                updatedAt: appleReferenceDateSeconds()
+            },
+            'stale-date': Math.floor(Date.now() / 1000) + LIVE_ACTIVITY_ALERT_TIMEOUT_SECONDS,
+            relevanceScore: isCritical ? 1 : 0.75
+        },
+        alert_id: alert.id,
+        alert_type: alert.type,
+        severity: alert.severity
+    };
+}
+
+function buildLiveActivityEndPayload(alert, log) {
+    const failCount = Number(log?.fail_count || 0);
+
+    return {
+        aps: {
+            timestamp: Math.floor(Date.now() / 1000),
+            event: 'end',
+            'content-state': {
+                lockStatus: 'locked',
+                securityState: failCount >= 3 ? 'lockdown' : 'warning',
+                lastEvent: alert.title,
+                failCount,
+                updatedAt: appleReferenceDateSeconds()
+            },
+            'dismissal-date': Math.floor(Date.now() / 1000) - 1
+        },
+        alert_id: alert.id,
+        alert_type: alert.type,
+        severity: alert.severity
+    };
+}
+
 async function sendApnsNotification(token, alert, unreadCount) {
     if (!hasApnsConfig()) {
         return { ok: false, skipped: true, status: 0, reason: 'APNS_NOT_CONFIGURED' };
@@ -267,6 +328,126 @@ async function sendApnsNotification(token, alert, unreadCount) {
             authorization: `bearer ${jwt}`,
             'apns-topic': topic,
             'apns-push-type': 'alert',
+            'apns-priority': '10',
+            'apns-expiration': expiration
+        });
+
+        request.setEncoding('utf8');
+        request.on('response', (headers) => {
+            statusCode = Number(headers[':status'] || 0);
+        });
+        request.on('data', (chunk) => {
+            responseBody += chunk;
+        });
+        request.on('end', () => {
+            client.close();
+
+            if (statusCode >= 200 && statusCode < 300) {
+                resolve({ ok: true, status: statusCode, reason: null });
+                return;
+            }
+
+            try {
+                const parsed = JSON.parse(responseBody || '{}');
+                resolve({ ok: false, status: statusCode, reason: parsed.reason || 'APNS_ERROR' });
+            } catch {
+                resolve({ ok: false, status: statusCode, reason: responseBody || 'APNS_ERROR' });
+            }
+        });
+        request.on('error', (error) => {
+            client.close();
+            resolve({ ok: false, status: 0, reason: error.message });
+        });
+        request.end(JSON.stringify(payload));
+    });
+}
+
+async function sendLiveActivityStartNotification(token, alert, log) {
+    if (!hasApnsConfig()) {
+        return { ok: false, skipped: true, status: 0, reason: 'APNS_NOT_CONFIGURED' };
+    }
+
+    const jwt = createApnsJwt();
+    const host = getApnsHost();
+    const topic = `${process.env.APNS_BUNDLE_ID}.push-type.liveactivity`;
+    const payload = buildLiveActivityStartPayload(alert, log);
+    const expiration = String(Math.floor(Date.now() / 1000) + APNS_EXPIRATION_SECONDS);
+
+    return new Promise((resolve) => {
+        let statusCode = 0;
+        let responseBody = '';
+        const client = http2.connect(`https://${host}`);
+
+        client.on('error', (error) => {
+            resolve({ ok: false, status: 0, reason: error.message });
+        });
+
+        const request = client.request({
+            ':method': 'POST',
+            ':path': `/3/device/${token}`,
+            authorization: `bearer ${jwt}`,
+            'apns-topic': topic,
+            'apns-push-type': 'liveactivity',
+            'apns-priority': '10',
+            'apns-expiration': expiration
+        });
+
+        request.setEncoding('utf8');
+        request.on('response', (headers) => {
+            statusCode = Number(headers[':status'] || 0);
+        });
+        request.on('data', (chunk) => {
+            responseBody += chunk;
+        });
+        request.on('end', () => {
+            client.close();
+
+            if (statusCode >= 200 && statusCode < 300) {
+                resolve({ ok: true, status: statusCode, reason: null });
+                return;
+            }
+
+            try {
+                const parsed = JSON.parse(responseBody || '{}');
+                resolve({ ok: false, status: statusCode, reason: parsed.reason || 'APNS_ERROR' });
+            } catch {
+                resolve({ ok: false, status: statusCode, reason: responseBody || 'APNS_ERROR' });
+            }
+        });
+        request.on('error', (error) => {
+            client.close();
+            resolve({ ok: false, status: 0, reason: error.message });
+        });
+        request.end(JSON.stringify(payload));
+    });
+}
+
+async function sendLiveActivityEndNotification(token, alert, log) {
+    if (!hasApnsConfig()) {
+        return { ok: false, skipped: true, status: 0, reason: 'APNS_NOT_CONFIGURED' };
+    }
+
+    const jwt = createApnsJwt();
+    const host = getApnsHost();
+    const topic = `${process.env.APNS_BUNDLE_ID}.push-type.liveactivity`;
+    const payload = buildLiveActivityEndPayload(alert, log);
+    const expiration = String(Math.floor(Date.now() / 1000) + APNS_EXPIRATION_SECONDS);
+
+    return new Promise((resolve) => {
+        let statusCode = 0;
+        let responseBody = '';
+        const client = http2.connect(`https://${host}`);
+
+        client.on('error', (error) => {
+            resolve({ ok: false, status: 0, reason: error.message });
+        });
+
+        const request = client.request({
+            ':method': 'POST',
+            ':path': `/3/device/${token}`,
+            authorization: `bearer ${jwt}`,
+            'apns-topic': topic,
+            'apns-push-type': 'liveactivity',
             'apns-priority': '10',
             'apns-expiration': expiration
         });
@@ -347,6 +528,105 @@ async function enqueueDeliveriesForAlert(alertId) {
     );
 
     return activeTokens.length;
+}
+
+async function sendLiveActivityStartForAlert(alert, log) {
+    if (!LIVE_ACTIVITY_PUSH_TO_START_ENABLED) return { sent: 0, failed: 0 };
+
+    const tokens = await prisma.liveActivityToken.findMany({
+        where: {
+            is_active: true,
+            token_type: 'push_to_start',
+            platform: 'ios'
+        }
+    });
+
+    if (tokens.length === 0) {
+        console.log(`[LiveActivity] Push-to-start token yok. alert_id=${alert.id}`);
+        return { sent: 0, failed: 0 };
+    }
+
+    let sent = 0;
+    let failed = 0;
+
+    for (const token of tokens) {
+        try {
+            const result = await sendLiveActivityStartNotification(token.token, alert, log);
+            if (result.ok) {
+                sent += 1;
+                console.log(`[LiveActivity] Start push sent. alert_id=${alert.id} token_id=${token.id}`);
+                continue;
+            }
+
+            failed += 1;
+            console.warn(`[LiveActivity] Start push failed. alert_id=${alert.id} token_id=${token.id} status=${result.status} reason=${result.reason}`);
+
+            if (isInvalidTokenResult(result)) {
+                await prisma.liveActivityToken.update({
+                    where: { id: token.id },
+                    data: { is_active: false }
+                });
+            }
+        } catch (error) {
+            failed += 1;
+            console.error(`[LiveActivity] Start push error. alert_id=${alert.id} token_id=${token.id}:`, error);
+        }
+    }
+
+    return { sent, failed };
+}
+
+function scheduleLiveActivityEndForAlert(alert, log) {
+    const timeoutMs = LIVE_ACTIVITY_ALERT_TIMEOUT_SECONDS * 1000;
+    setTimeout(() => {
+        void sendLiveActivityEndForAlert(alert, log).catch((error) => {
+            console.error(`[LiveActivity] Scheduled end failed. alert_id=${alert.id}:`, error);
+        });
+    }, timeoutMs).unref?.();
+}
+
+async function sendLiveActivityEndForAlert(alert, log) {
+    const tokens = await prisma.liveActivityToken.findMany({
+        where: {
+            is_active: true,
+            token_type: 'update',
+            platform: 'ios'
+        }
+    });
+
+    if (tokens.length === 0) {
+        console.log(`[LiveActivity] End push için update token yok. alert_id=${alert.id}`);
+        return { sent: 0, failed: 0 };
+    }
+
+    let sent = 0;
+    let failed = 0;
+
+    for (const token of tokens) {
+        try {
+            const result = await sendLiveActivityEndNotification(token.token, alert, log);
+            if (result.ok) {
+                sent += 1;
+                console.log(`[LiveActivity] End push sent. alert_id=${alert.id} token_id=${token.id}`);
+                continue;
+            }
+
+            failed += 1;
+            console.warn(`[LiveActivity] End push failed. alert_id=${alert.id} token_id=${token.id} status=${result.status} reason=${result.reason}`);
+
+            if (isInvalidTokenResult(result)) {
+                await prisma.liveActivityToken.update({
+                    where: { id: token.id },
+                    data: { is_active: false }
+                });
+            }
+        } catch (error) {
+            failed += 1;
+            console.error(`[LiveActivity] End push error. alert_id=${alert.id} token_id=${token.id}:`, error);
+        }
+    }
+
+    return { sent, failed };
 }
 
 async function isPushSuppressedByCooldown(alert) {
@@ -627,6 +907,11 @@ app.post('/api/access-log', async (req, res) => {
                     console.error(`[MAIL] Critical alert email failed. alert_id=${alert.id}:`, error);
                 });
             }
+
+            void sendLiveActivityStartForAlert(alert, newLog).catch((error) => {
+                console.error(`[LiveActivity] Alert start push failed. alert_id=${alert.id}:`, error);
+            });
+            scheduleLiveActivityEndForAlert(alert, newLog);
         }
 
         console.log('Yeni log kaydedildi:', newLog);
@@ -704,6 +989,62 @@ app.post('/api/device-token', async (req, res) => {
     } catch (error) {
         console.error('Device token kaydetme hatasi:', error);
         return res.status(500).json({ error: 'Device token could not be registered.' });
+    }
+});
+
+// 2.1 LIVE ACTIVITY PUSH-TO-START TOKEN KAYDI (iOS Dynamic Island)
+app.post('/api/live-activity/push-to-start-token', async (req, res) => {
+    try {
+        const { user_id, token, token_type } = req.body;
+        const normalizedToken = String(token || '').trim().toLowerCase();
+        const normalizedTokenType = token_type === 'update' ? 'update' : 'push_to_start';
+
+        if (!normalizedToken) {
+            return res.status(400).json({ error: 'Token is required.' });
+        }
+
+        if (!/^[a-f0-9]{40,512}$/.test(normalizedToken)) {
+            return res.status(400).json({ error: 'Token format is invalid.' });
+        }
+
+        let resolvedUserId = null;
+        if (user_id !== undefined && user_id !== null) {
+            resolvedUserId = Number(user_id);
+            if (Number.isNaN(resolvedUserId)) {
+                return res.status(400).json({ error: 'user_id must be numeric.' });
+            }
+        }
+
+        const existing = await prisma.liveActivityToken.findUnique({
+            where: { token: normalizedToken },
+            select: { id: true }
+        });
+
+        const savedToken = await prisma.liveActivityToken.upsert({
+            where: { token: normalizedToken },
+            update: {
+                user_id: resolvedUserId,
+                token_type: normalizedTokenType,
+                platform: 'ios',
+                is_active: true
+            },
+            create: {
+                token: normalizedToken,
+                user_id: resolvedUserId,
+                token_type: normalizedTokenType,
+                platform: 'ios'
+            }
+        });
+
+        console.log(`🏝️ Live Activity token kaydedildi id=${savedToken.id} type=${normalizedTokenType} user_id=${resolvedUserId ?? 'null'}`);
+
+        return res.status(existing ? 200 : 201).json({
+            message: existing ? 'Live Activity token updated.' : 'Live Activity token registered.',
+            token_id: savedToken.id
+        });
+    } catch (error) {
+        console.error('Live Activity token kaydetme hatasi:', error);
+        return res.status(500).json({ error: 'Live Activity token could not be registered.' });
     }
 });
 
